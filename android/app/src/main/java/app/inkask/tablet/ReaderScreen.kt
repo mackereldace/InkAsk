@@ -457,7 +457,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             if (horizontal) PdfScrollPadding(20.dp.roundToPx(), 20.dp.roundToPx())
             else PdfScrollPadding(0, 220.dp.roundToPx())
         }
-        fun beginZoom(window: Offset) {
+        fun findZoomPivot(window: Offset): PdfZoomPivot? {
             val items = scroll.layoutInfo.visibleItemsInfo
             val first = items.firstOrNull { it.index == 0 }
             val last = items.firstOrNull { it.index == pdf.pageCount - 1 }
@@ -470,27 +470,52 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     first?.let { item.offset - it.offset },
                     last?.let { it.offset + it.size - item.offset }) to (x * x + y * y)
             }
-            zoomPivot = visible.minByOrNull { it.second }?.first
+            return visible.minByOrNull { it.second }?.first
+        }
+        fun beginZoom(window: Offset) {
+            zoomPivot = findZoomPivot(window)
             selection = null
             draggingText = null
         }
+        fun verticalPageExtent(numbers: IntProgression, scaledWidth: Int, limit: Int): Float? {
+            var extent = 0f
+            for (number in numbers) {
+                val size = pageLayouts[number]?.size ?: pages[number]?.let { indexed ->
+                    val w = indexed.optDouble("width").toInt()
+                    val h = indexed.optDouble("height").toInt()
+                    if (w > 0 && h > 0) PageSize(w, h) else null
+                } ?: return null
+                val rotated = size.rotated(rotation)
+                extent += (scaledWidth * (rotated.height.toFloat() / rotated.width)).roundToInt()
+                if (extent >= limit) break
+            }
+            return extent
+        }
         fun zoomTo(target: Float, window: Offset) {
             val next = target.coerceIn(.25f, 3f)
-            val view = viewportCoordinates?.takeIf { it.isAttached }
-            val pivot = zoomPivot
-            if (view != null && pivot != null) {
-                val focus = view.windowToLocal(window)
-                val ratio = next / pivot.scale
-                val main = if (horizontal) focus.x - pivot.point.x * ratio else focus.y - pivot.point.y * ratio
-                val viewport = if (horizontal) view.size.width else view.size.height
-                val position = pdfZoomPosition(main, viewport, normalPadding,
-                    pivot.distanceToStart?.times(ratio), pivot.distanceToEnd?.times(ratio))
-                zoomPadding = position.padding
-                scroll.requestScrollToItem(pivot.item, position.offset)
-                val extent = (if (horizontal) pivot.size.height else pivot.size.width) * ratio
-                val desired = if (horizontal) focus.y - pivot.point.y * ratio else focus.x - pivot.point.x * ratio
-                across = desired - (crossSize - extent) / 2
+            val view = viewportCoordinates?.takeIf { it.isAttached } ?: return
+            val pivot = zoomPivot ?: findZoomPivot(window)?.also { zoomPivot = it } ?: return
+            val focus = view.windowToLocal(window)
+            val ratio = next / pivot.scale
+            val main = if (horizontal) focus.x - pivot.point.x * ratio else focus.y - pivot.point.y * ratio
+            val viewport = if (horizontal) view.size.width else view.size.height
+            val scaledWidth = with(density) { (baseWidth * next).roundToPx() }
+            // Zooming out can reveal pages beyond the visible items at gesture start.
+            val position = if (horizontal) {
+                val width = scaledWidth.toFloat()
+                pdfZoomPosition(main, viewport, normalPadding, pivot.item * width, (pdf.pageCount - pivot.item) * width)
+            } else {
+                val before = pivot.distanceToStart?.times(ratio)
+                    ?: verticalPageExtent(pivot.item downTo 1, scaledWidth, viewport)
+                val after = pivot.distanceToEnd?.times(ratio)
+                    ?: verticalPageExtent(pivot.item + 1..pdf.pageCount, scaledWidth, viewport)
+                pdfZoomPosition(main, viewport, normalPadding, before, after)
             }
+            zoomPadding = position.padding
+            scroll.requestScrollToItem(pivot.item, position.offset)
+            val extent = (if (horizontal) pivot.size.height else pivot.size.width) * ratio
+            val desired = if (horizontal) focus.y - pivot.point.y * ratio else focus.x - pivot.point.x * ratio
+            across = desired - (crossSize - extent) / 2
             scale = next
         }
         fun zoomFromCenter(target: Float) {
