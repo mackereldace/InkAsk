@@ -1,5 +1,8 @@
 package app.inkask.tablet
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -27,44 +30,64 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
 internal val ReaderIslandClearance = 70.dp
+private val IslandSnapDistance = 52.dp
+private val IslandEdgeHysteresis = 8.dp
 
 internal enum class ReaderIslandEdge {
     Free, Top, Bottom, Left, Right;
 
     val vertical get() = this == Left || this == Right
+
+    fun distanceFrom(at: Offset, viewport: IntSize): Float = when (this) {
+        Free -> Float.POSITIVE_INFINITY
+        Top -> at.y
+        Bottom -> viewport.height - at.y
+        Left -> at.x
+        Right -> viewport.width - at.x
+    }
 }
 
 internal data class ReaderIslandPosition(val x: Float, val y: Float, val edge: ReaderIslandEdge) {
-    fun offset(viewport: IntSize, island: IntSize, margin: Int, dragging: Offset? = null): IntOffset {
-        fun axis(space: Int, length: Int, fraction: Float, drag: Float?, atStart: Boolean, atEnd: Boolean): Int {
+    fun center(viewport: IntSize) = Offset(x * viewport.width, y * viewport.height)
+
+    fun offset(viewport: IntSize, island: IntSize, margin: Int, attraction: Float = 1f): IntOffset {
+        fun axis(space: Int, length: Int, midpoint: Float, atStart: Boolean, atEnd: Boolean): Int {
             val max = (space - length).coerceAtLeast(0)
             val gap = margin.coerceAtMost(max / 2)
-            val candidate = when {
-                drag != null -> drag - length / 2f
+            val free = (midpoint - length / 2f).coerceIn(gap.toFloat(), (max - gap).toFloat())
+            val docked = when {
                 atStart -> gap.toFloat()
                 atEnd -> (max - gap).toFloat()
-                else -> fraction * space - length / 2f
+                else -> free
             }
-            return candidate.roundToInt().coerceIn(gap, max - gap)
+            return (free + (docked - free) * attraction).roundToInt()
         }
+        val center = center(viewport)
         return IntOffset(
-            axis(viewport.width, island.width, x, dragging?.x, edge == ReaderIslandEdge.Left, edge == ReaderIslandEdge.Right),
-            axis(viewport.height, island.height, y, dragging?.y, edge == ReaderIslandEdge.Top, edge == ReaderIslandEdge.Bottom),
+            axis(viewport.width, island.width, center.x, edge == ReaderIslandEdge.Left, edge == ReaderIslandEdge.Right),
+            axis(viewport.height, island.height, center.y, edge == ReaderIslandEdge.Top, edge == ReaderIslandEdge.Bottom),
         )
     }
 
     companion object {
-        fun dropped(at: Offset, viewport: IntSize, snapDistance: Float): ReaderIslandPosition {
-            val width = viewport.width.coerceAtLeast(1).toFloat()
-            val height = viewport.height.coerceAtLeast(1).toFloat()
-            val x = at.x.coerceIn(0f, width)
-            val y = at.y.coerceIn(0f, height)
-            val nearest = listOf(
-                ReaderIslandEdge.Left to x, ReaderIslandEdge.Right to (width - x),
-                ReaderIslandEdge.Top to y, ReaderIslandEdge.Bottom to (height - y),
-            ).minBy { it.second }
-            return ReaderIslandPosition(x / width, y / height,
-                if (nearest.second <= snapDistance) nearest.first else ReaderIslandEdge.Free)
+        fun fromDrag(
+            at: Offset,
+            viewport: IntSize,
+            snapDistance: Float,
+            previousEdge: ReaderIslandEdge = ReaderIslandEdge.Free,
+            hysteresis: Float = 0f,
+        ): ReaderIslandPosition {
+            val bounds = IntSize(viewport.width.coerceAtLeast(1), viewport.height.coerceAtLeast(1))
+            val point = Offset(at.x.coerceIn(0f, bounds.width.toFloat()), at.y.coerceIn(0f, bounds.height.toFloat()))
+            val nearest = ReaderIslandEdge.entries.minBy { it.distanceFrom(point, bounds) }
+            val distance = nearest.distanceFrom(point, bounds)
+            val previousDistance = previousEdge.distanceFrom(point, bounds)
+            val edge = when {
+                previousDistance <= snapDistance + hysteresis && previousDistance <= distance + hysteresis -> previousEdge
+                distance <= snapDistance -> nearest
+                else -> ReaderIslandEdge.Free
+            }
+            return ReaderIslandPosition(point.x / bounds.width, point.y / bounds.height, edge)
         }
     }
 }
@@ -76,7 +99,13 @@ internal fun ReaderIsland(
     val place by rememberUpdatedState(onPlace)
     var viewport by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var island by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    var dragging by remember { mutableStateOf<Offset?>(null) }
+    var dragging by remember { mutableStateOf<ReaderIslandPosition?>(null) }
+    val placement = dragging ?: position
+    val dockProgress = animateFloatAsState(
+        targetValue = if (dragging == null) 1f else 0f,
+        animationSpec = tween(140),
+        label = "Reader island docking",
+    )
 
     Layout(
         modifier = Modifier.fillMaxSize().onGloballyPositioned { viewport = it },
@@ -96,9 +125,13 @@ internal fun ReaderIsland(
                                     val root = viewport?.takeIf { it.isAttached } ?: return@awaitEachGesture
                                     val handle = island?.takeIf { it.isAttached } ?: return@awaitEachGesture
                                     val at = root.windowToLocal(handle.localToWindow(change.position))
-                                    dragging = at
+                                    val target = ReaderIslandPosition.fromDrag(
+                                        at, root.size, IslandSnapDistance.toPx(),
+                                        dragging?.edge ?: ReaderIslandEdge.Free, IslandEdgeHysteresis.toPx(),
+                                    )
+                                    dragging = target
                                     change.consume()
-                                    if (released) place(ReaderIslandPosition.dropped(at, root.size, 42.dp.toPx()))
+                                    if (released) place(target)
                                 }
                                 if (released || !change.pressed) return@awaitEachGesture
                             }
@@ -112,30 +145,40 @@ internal fun ReaderIsland(
                 border = BorderStroke(1.dp, Line),
                 shadowElevation = 8.dp,
             ) {
-                when {
-                    dragging != null -> Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
-                        Icon(painterResource(R.drawable.inkask_ic_move), contentDescription = "移动浮岛",
-                            tint = Green, modifier = Modifier.size(22.dp))
+                Box(
+                    Modifier.animateContentSize(tween(140), alignment = Alignment.Center),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    when {
+                        dragging?.edge == ReaderIslandEdge.Free -> Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
+                            Icon(painterResource(R.drawable.inkask_ic_move), contentDescription = "移动浮岛",
+                                tint = Green, modifier = Modifier.size(22.dp))
+                        }
+                        placement.edge.vertical -> Column(
+                            Modifier.verticalScroll(rememberScrollState()).padding(5.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            content = { content() },
+                        )
+                        else -> Row(
+                            Modifier.horizontalScroll(rememberScrollState()).padding(5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            content = { content() },
+                        )
                     }
-                    position.edge.vertical -> Column(
-                        Modifier.verticalScroll(rememberScrollState()).padding(5.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        content = { content() },
-                    )
-                    else -> Row(
-                        Modifier.horizontalScroll(rememberScrollState()).padding(5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        content = { content() },
-                    )
                 }
             }
         },
     ) { items, constraints ->
         val viewportSize = IntSize(constraints.maxWidth, constraints.maxHeight)
         val toolbar = items.single().measure(constraints.copy(minWidth = 0, minHeight = 0))
-        val offset = position.offset(viewportSize, IntSize(toolbar.width, toolbar.height), 10.dp.roundToPx(), dragging)
+        val edgeDistance = placement.edge.distanceFrom(placement.center(viewportSize), viewportSize)
+        val pull = (1f - edgeDistance / (2 * IslandSnapDistance.toPx())).coerceIn(0f, 1f)
+        val settle = if (dragging == null) dockProgress.value else 0f
+        val offset = placement.offset(
+            viewportSize, IntSize(toolbar.width, toolbar.height), 10.dp.roundToPx(), pull + (1f - pull) * settle,
+        )
         layout(viewportSize.width, viewportSize.height) { toolbar.place(offset) }
     }
 }

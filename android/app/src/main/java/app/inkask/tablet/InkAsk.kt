@@ -61,6 +61,7 @@ internal enum class ExportKind(val label: String, val suffix: String) {
     NOTES("笔记目录 (.zip)", "-笔记目录.zip"),
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun InkAsk(workspace: Workspace) {
     val scope = rememberCoroutineScope()
@@ -142,7 +143,10 @@ internal fun InkAsk(workspace: Workspace) {
         if (drawer) drawer = false else showLibrary()
     }
 
-    Box(Modifier.fillMaxSize().background(Desk).safeDrawingPadding().imePadding()) {
+    val libraryStatusInset = if (opened == null) {
+        Modifier.windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility.only(WindowInsetsSides.Top))
+    } else Modifier
+    Box(Modifier.fillMaxSize().background(Desk).safeDrawingPadding().then(libraryStatusInset).imePadding()) {
         Column(Modifier.fillMaxSize()) {
             if (opened == null) {
                 Row(
