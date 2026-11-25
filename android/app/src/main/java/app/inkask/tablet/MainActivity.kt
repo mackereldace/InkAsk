@@ -15,29 +15,16 @@ import androidx.core.view.WindowInsetsControllerCompat
 class MainActivity : ComponentActivity() {
     internal var answerPinch: AnswerPinch? = null
     internal var composerOutsideTap: ComposerOutsideTap? = null
-    private var readerImmersive = false
-
-    internal fun setReaderImmersive(enabled: Boolean) {
-        if (readerImmersive == enabled) return
-        readerImmersive = enabled
-        updateReaderSystemBars()
-    }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && readerImmersive) updateReaderSystemBars()
+        if (hasFocus) hideSystemBars()
     }
 
-    private fun updateReaderSystemBars() {
+    private fun hideSystemBars() {
         val controller = WindowCompat.getInsetsController(window, window.decorView)
-        val bars = WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
-        if (readerImmersive) {
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(bars)
-        } else {
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-            controller.show(bars)
-        }
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
@@ -54,6 +41,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.light(0xfff8f8f4.toInt(), 0xfff8f8f4.toInt()),
             navigationBarStyle = SystemBarStyle.light(0xfff8f8f4.toInt(), 0xfff8f8f4.toInt()),
         )
+        hideSystemBars()
         val workspace = Workspace(applicationContext)
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(primary = Green, background = Desk, surface = Paper, onBackground = Ink, onSurface = Ink)) {

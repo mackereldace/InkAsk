@@ -64,9 +64,7 @@ internal enum class ExportKind(val label: String, val suffix: String) {
 @Composable
 internal fun InkAsk(workspace: Workspace) {
     val scope = rememberCoroutineScope()
-    val localContext = LocalContext.current
-    val context = localContext.applicationContext
-    val activity = remember(localContext) { localContext.mainActivity() }
+    val context = LocalContext.current.applicationContext
     val model = remember(context) { ReadingModel(context) }
     var library by remember { mutableStateOf(Library(emptyList(), emptyList(), emptyMap())) }
     var opened by remember { mutableStateOf<Opened?>(null) }
@@ -86,8 +84,6 @@ internal fun InkAsk(workspace: Workspace) {
             readerLayout.getFloat("island-x", .5f), readerLayout.getFloat("island-y", 1f), edge,
         ))
     }
-    SideEffect { activity?.setReaderImmersive(opened != null) }
-    DisposableEffect(activity) { onDispose { activity?.setReaderImmersive(false) } }
 
     fun act(block: suspend () -> Unit) {
         if (busy) return
