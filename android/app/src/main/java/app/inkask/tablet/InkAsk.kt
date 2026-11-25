@@ -1,6 +1,5 @@
 package app.inkask.tablet
 
-import android.content.ClipData
 import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -9,29 +8,32 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.draganddrop.dragAndDropSource
-import androidx.compose.foundation.draganddrop.dragAndDropTarget
-import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.draganddrop.DragAndDropEvent
-import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.DragAndDropTransferData
-import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.input.pointer.isCtrlPressed
+import androidx.compose.ui.input.pointer.isMetaPressed
+import androidx.compose.ui.input.pointer.isShiftPressed
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -307,7 +309,7 @@ internal fun Control(
 }
 
 @Composable
-private fun InkIcon(id: Int, color: Color = LocalContentColor.current, size: Int = 16) {
+internal fun InkIcon(id: Int, color: Color = LocalContentColor.current, size: Int = 16) {
     Icon(painterResource(id), contentDescription = null, tint = color, modifier = Modifier.size(size.dp))
 }
 
@@ -322,97 +324,194 @@ private fun LibraryScreen(
     var editing by remember { mutableStateOf<Pair<String?, String>?>(null) }
     var selected by remember(folderId, query) { mutableStateOf(setOf<LibraryItem>()) }
     var cut by remember { mutableStateOf(setOf<LibraryItem>()) }
+    var anchor by remember(folderId, query) { mutableStateOf<LibraryItem?>(null) }
+    val drag = remember(folderId, query, grid) { LibraryDragInteraction() }
+    val rules = remember(library) { LibraryDropRules(library) }
+    val gridState = key(folderId, query, grid) { rememberLazyGridState() }
+    val draggedItems by remember(drag) { derivedStateOf { drag.session?.items.orEmpty() } }
+    val dropTarget by remember(drag) { derivedStateOf { drag.session?.destination } }
+    val scrollEdge = with(LocalDensity.current) { 56.dp.toPx() }
+    val scrollSpeed = with(LocalDensity.current) { 1080.dp.toPx() }
+    val contentsSite = LibraryDropSite(LibraryDropKind.Contents, folderId)
     var folderMenu by remember { mutableStateOf<Folder?>(null) }
     var moving by remember { mutableStateOf(setOf<LibraryItem>()) }
     var confirmRemove by remember { mutableStateOf(false) }
     val folder = library.folders.firstOrNull { it.id == folderId }
     val folders = library.folders.filter { if (query.isBlank()) it.parentId == folderId else it.name.contains(query.trim(), true) }
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, Folder::name))
     val files = library.documents.filter { if (query.isBlank()) library.membership[it.id] == folderId else it.name.contains(query.trim(), true) }
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, PdfItem::name))
+    val order = folders.map { LibraryItem(it.id, true) } + files.map { LibraryItem(it.id, false) }
     val trail = generateSequence(folder) { next -> library.folders.firstOrNull { it.id == next.parentId } }
         .take(library.folders.size).toList().asReversed()
-    fun toggle(item: LibraryItem) {
-        selected = if (item in selected) selected - item else selected + item
+    fun select(item: LibraryItem, additive: Boolean, range: Boolean = false) {
+        selected = librarySelection(selected, order, item, anchor, additive, range)
+        if (!range) anchor = item
+    }
+    fun clearSelection() {
+        selected = emptySet()
+        anchor = null
     }
     fun moveTo(items: Set<LibraryItem>, target: String?) {
         if (items.isEmpty() || busy) return
         move(items, target) {
             cut = cut - items
-            selected = emptySet()
+            clearSelection()
             moving = emptySet()
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 18.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(folder?.name ?: "阅读空间", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+    LaunchedEffect(drag, draggedItems.isNotEmpty(), gridState, rules, scrollEdge, scrollSpeed) {
+        if (drag.session == null) return@LaunchedEffect
+        var previous = withFrameNanos { it }
+        while (drag.session != null) {
+            val frame = withFrameNanos { it }
+            val elapsed = ((frame - previous) / 1_000_000_000f).coerceAtMost(.04f)
+            previous = frame
+            val session = drag.session ?: break
+            val bounds = drag.bounds(contentsSite) ?: continue
+            if (session.point.x !in bounds.left..bounds.right ||
+                session.point.y !in (bounds.top - scrollEdge)..(bounds.bottom + scrollEdge)) continue
+            val delta = when {
+                session.point.y < bounds.top + scrollEdge -> -scrollSpeed *
+                    ((bounds.top + scrollEdge - session.point.y) / scrollEdge).coerceIn(0f, 1f)
+                session.point.y > bounds.bottom - scrollEdge -> scrollSpeed *
+                    ((session.point.y - bounds.bottom + scrollEdge) / scrollEdge).coerceIn(0f, 1f)
+                else -> 0f
             }
-            OutlinedButton(onClick = { editing = Pair(null, "") }, shape = ControlShape, enabled = !busy) {
-                Text("新建文件夹")
-            }
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = addPdf, shape = ControlShape, enabled = !busy) { Text("＋ 打开 PDF") }
-        }
-        Spacer(Modifier.height(22.dp))
-        FlowRow(Modifier.fillMaxWidth().background(Bar, ReaderCardShape).padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.Center,
-            itemVerticalAlignment = Alignment.CenterVertically) {
-            Control("‹", "返回上一级文件夹", enabled = folder != null) { navigate(folder?.parentId) }
-            Control("▦", "图标视图", active = grid) { grid = true }
-            Control("☰", "列表视图", active = !grid) { grid = false }
-            Control("剪切", enabled = selected.isNotEmpty()) { cut = selected; selected = emptySet() }
-            Control("粘贴", enabled = cut.isNotEmpty() && !busy) { moveTo(cut, folderId) }
-            if (selected.isNotEmpty()) {
-                Control("移动到…", enabled = !busy) { moving = selected }
-                Control("取消选择") { selected = emptySet() }
-            }
-            val singleFolder = selected.singleOrNull()?.takeIf { it.folder }
-            if (singleFolder != null) Control("文件夹选项") {
-                folderMenu = library.folders.firstOrNull { it.id == singleFolder.id }
-            }
-            if (selected.isNotEmpty() && selected.none { it.folder }) Control("删除") { confirmRemove = true }
-            Spacer(Modifier.width(8.dp))
-            OutlinedTextField(query, search, singleLine = true, placeholder = { Text("搜索资料与文件夹") }, modifier = Modifier.widthIn(max = 260.dp))
-        }
-        Row(Modifier.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.libraryDrop(!busy) { moveTo(it, null) }) { Control("阅读空间") { navigate(null) } }
-            trail.forEach { item ->
-                Text("›", color = Muted)
-                Box(Modifier.libraryDrop(!busy) { moveTo(it, item.id) }) { Control(item.name) { navigate(item.id) } }
+            if (delta != 0f) {
+                gridState.scrollBy(delta * elapsed)
+                drag.session?.let { drag.update(it.point, rules) }
             }
         }
-        HorizontalDivider(color = Line)
-        if (folders.isEmpty() && files.isEmpty()) {
-            Column(Modifier.fillMaxWidth().weight(1f), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (query.isBlank()) "这个文件夹还是空的" else "没有找到匹配的项目", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(14.dp))
-                OutlinedButton(onClick = importArchive, shape = ControlShape, enabled = !busy) { Text("导入 InkAsk 项目") }
-                if (library.documents.isEmpty()) Control("先打开示例资料", enabled = !busy, action = sample)
+    }
+
+    @Composable
+    fun entry(ref: LibraryItem, name: String, detail: String, openItem: () -> Unit) {
+        val itemSite = LibraryDropSite(LibraryDropKind.Folder, ref.id)
+        val source = ref in draggedItems
+        DisposableEffect(drag, ref) {
+            onDispose {
+                drag.sources.remove(ref)
+                drag.selectionControls.remove(ref)
             }
-        } else {
-            LazyVerticalGrid(columns = if (grid) GridCells.Adaptive(154.dp) else GridCells.Fixed(1),
-                modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(folders, key = { "folder-${it.id}" }) { item ->
-                    val ref = LibraryItem(item.id, true)
-                    val size = library.folders.count { it.parentId == item.id } + library.membership.count { it.value == item.id }
-                    LibraryTile(item.name, "$size 个项目", true, grid, ref in selected, ref in cut,
-                        if (ref in selected) selected else setOf(ref), !busy,
-                        modifier = Modifier.libraryDrop(!busy) { moveTo(it, item.id) },
-                        onClick = { if (selected.isEmpty()) navigate(item.id) else toggle(ref) }, onLongClick = { toggle(ref) })
+        }
+        LibraryTile(
+            name, detail, ref.folder, grid, ref in selected, ref in cut, source,
+            draggingTo = ref.folder && dropTarget == itemSite, enabled = !busy,
+            modifier = if (ref.folder) Modifier.libraryDropSite(drag, itemSite) else Modifier,
+            body = Modifier.onGloballyPositioned { drag.sources[ref] = LibraryDragInteraction.Source(ref, name, it) },
+            selectionControl = Modifier.onGloballyPositioned { drag.selectionControls[ref] = it },
+            onSelect = { select(ref, additive = true) },
+            onClick = { if (selected.isEmpty()) openItem() else select(ref, additive = true) },
+        )
+    }
+
+    val gestureInput = Modifier.libraryItemInput(
+        drag, !busy,
+        onMouseClick = { ref, modifiers, double ->
+            val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+            val range = modifiers.isShiftPressed
+            if (double && !additive && !range) {
+                if (ref.folder) navigate(ref.id) else library.documents.firstOrNull { it.id == ref.id }?.let(open)
+            } else select(ref, additive, range)
+        },
+        onHold = { select(it, additive = true) },
+        onDragStart = { source, point ->
+            val items = if (source.item in selected) selected else setOf(source.item)
+            drag.start(items, source.name, source.item.folder, point, rules)
+        },
+        onDrag = { drag.update(it, rules) },
+        onDrop = { drag.finish(it, rules, ::moveTo) },
+        onCancel = drag::cancel,
+    )
+    Box(Modifier.fillMaxSize().onGloballyPositioned { drag.root = it }.then(gestureInput)) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 18.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(folder?.name ?: "阅读空间", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                items(files, key = PdfItem::id) { item ->
-                    val ref = LibraryItem(item.id, false)
-                    LibraryTile(item.name, "${item.pageCount} 页 · PDF", false, grid, ref in selected, ref in cut,
-                        if (ref in selected) selected else setOf(ref), !busy,
-                        onClick = { if (selected.isEmpty()) open(item) else toggle(ref) }, onLongClick = { toggle(ref) })
+                OutlinedButton(onClick = { editing = Pair(null, "") }, shape = ControlShape, enabled = !busy) {
+                    Text("新建文件夹")
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = addPdf, shape = ControlShape, enabled = !busy) { Text("＋ 打开 PDF") }
+            }
+            Spacer(Modifier.height(22.dp))
+            FlowRow(Modifier.fillMaxWidth().background(Bar, ReaderCardShape).padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.Center,
+                itemVerticalAlignment = Alignment.CenterVertically) {
+                val up = LibraryDropSite(LibraryDropKind.Up, folder?.parentId)
+                Box(if (folder == null) Modifier else Modifier.libraryDropSite(drag, up)) {
+                    Control("‹", "返回上一级文件夹", enabled = folder != null && !busy,
+                        active = dropTarget == up) { navigate(folder?.parentId) }
+                }
+                Control("▦", "图标视图", active = grid) { grid = true }
+                Control("☰", "列表视图", active = !grid) { grid = false }
+                Control("剪切", enabled = selected.isNotEmpty() && !busy) { cut = selected; clearSelection() }
+                Control("粘贴", enabled = cut.isNotEmpty() && !busy) { moveTo(cut, folderId) }
+                if (selected.isNotEmpty()) {
+                    Control("移动到…", enabled = !busy) { moving = selected }
+                    Control("取消选择", action = ::clearSelection)
+                }
+                val singleFolder = selected.singleOrNull()?.takeIf { it.folder }
+                if (singleFolder != null) Control("文件夹选项") {
+                    folderMenu = library.folders.firstOrNull { it.id == singleFolder.id }
+                }
+                if (selected.isNotEmpty() && selected.none { it.folder }) Control("删除") { confirmRemove = true }
+                Spacer(Modifier.width(8.dp))
+                OutlinedTextField(query, search, singleLine = true, placeholder = { Text("搜索资料与文件夹") }, modifier = Modifier.widthIn(max = 260.dp))
+            }
+            FlowRow(Modifier.padding(vertical = 6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
+                val rootSite = LibraryDropSite(LibraryDropKind.Path, null)
+                Box(Modifier.libraryDropSite(drag, rootSite)) {
+                    Control("阅读空间", active = dropTarget == rootSite, enabled = !busy) { navigate(null) }
+                }
+                trail.forEach { item ->
+                    Text("›", color = Muted)
+                    val site = LibraryDropSite(LibraryDropKind.Path, item.id)
+                    Box(Modifier.libraryDropSite(drag, site)) {
+                        Control(item.name, active = dropTarget == site, enabled = !busy) { navigate(item.id) }
+                    }
                 }
             }
+            HorizontalDivider(color = Line)
+            val overContents = dropTarget == contentsSite
+            val emptyArea = if (selected.isEmpty()) Modifier else Modifier.pointerInput(folderId, query) {
+                detectTapGestures { clearSelection() }
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth().weight(1f).libraryDropSite(drag, contentsSite).then(emptyArea),
+                shape = ReaderCardShape, color = if (overContents) PaleGreen else Desk,
+                border = if (overContents) BorderStroke(2.dp, Green) else null,
+            ) {
+                if (folders.isEmpty() && files.isEmpty()) {
+                    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(if (query.isBlank()) "这个文件夹还是空的" else "没有找到匹配的项目", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(14.dp))
+                        OutlinedButton(onClick = importArchive, shape = ControlShape, enabled = !busy) { Text("导入 InkAsk 项目") }
+                        if (library.documents.isEmpty()) Control("先打开示例资料", enabled = !busy, action = sample)
+                    }
+                } else {
+                    LazyVerticalGrid(columns = if (grid) GridCells.Adaptive(154.dp) else GridCells.Fixed(1), state = gridState,
+                        modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(folders, key = { "folder-${it.id}" }) { item ->
+                            val size = library.folders.count { it.parentId == item.id } + library.membership.count { it.value == item.id }
+                            entry(LibraryItem(item.id, true), item.name, "$size 个项目") { navigate(item.id) }
+                        }
+                        items(files, key = { "document-${it.id}" }) { item ->
+                            entry(LibraryItem(item.id, false), item.name, "${item.pageCount} 页 · PDF") { open(item) }
+                        }
+                    }
+                }
+            }
+            HorizontalDivider(color = Line)
+            Text(if (selected.isEmpty()) "${folders.size} 个文件夹，${files.size} 份资料" else "已选中 ${selected.size} 项",
+                modifier = Modifier.padding(vertical = 10.dp), color = Muted, fontSize = 12.sp)
         }
-        HorizontalDivider(color = Line)
-        Text(if (selected.isEmpty()) "${folders.size} 个文件夹，${files.size} 份资料" else "已选中 ${selected.size} 项",
-            modifier = Modifier.padding(vertical = 10.dp), color = Muted, fontSize = 12.sp)
+        LibraryDragPreview(drag)
     }
     editing?.let { (id, name) ->
         AlertDialog(onDismissRequest = { editing = null },
@@ -454,65 +553,40 @@ private fun LibraryScreen(
 }
 
 @Composable
-private fun LibraryTile(name: String, details: String, folder: Boolean, grid: Boolean, selected: Boolean, cut: Boolean,
-                        dragItems: Set<LibraryItem>, enabled: Boolean, modifier: Modifier = Modifier,
-                        onClick: () -> Unit, onLongClick: () -> Unit) {
-    Surface(border = BorderStroke(1.dp, if (selected) Green else Line), color = if (selected || cut) PaleGreen else Paper,
-        shape = ReaderCardShape, modifier = modifier.combinedClickable(enabled = enabled, onClick = onClick, onLongClick = onLongClick)) {
-        if (grid) {
-            Column(Modifier.height(138.dp).fillMaxWidth().padding(12.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    InkIcon(if (folder) R.drawable.inkask_ic_folder_open else R.drawable.inkask_ic_file_text, Green, 26)
+private fun LibraryTile(
+    name: String, details: String, folder: Boolean, grid: Boolean, selected: Boolean, cut: Boolean,
+    dragging: Boolean, draggingTo: Boolean, enabled: Boolean, modifier: Modifier = Modifier,
+    body: Modifier, selectionControl: Modifier, onClick: () -> Unit, onSelect: () -> Unit,
+) {
+    val fill = if (selected || draggingTo) PaleGreen else Paper
+    Box(modifier.fillMaxWidth()) {
+        Surface(
+            border = BorderStroke(if (draggingTo) 2.dp else 1.dp, if (selected || draggingTo) Green else Line),
+            color = fill, shape = ReaderCardShape,
+            modifier = body.fillMaxWidth().alpha(if (dragging || cut) .55f else 1f)
+                .semantics { this.selected = selected }.clickable(enabled = enabled, onClick = onClick),
+        ) {
+            val icon = if (folder) R.drawable.inkask_ic_folder_open else R.drawable.inkask_ic_file_text
+            if (grid) {
+                Column(Modifier.height(138.dp).fillMaxWidth().padding(12.dp)) {
+                    Box(Modifier.height(44.dp), contentAlignment = Alignment.CenterStart) { InkIcon(icon, Green, 26) }
+                    Spacer(Modifier.height(4.dp))
+                    Text(name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        color = Ink, fontSize = 14.sp, lineHeight = 18.sp)
                     Spacer(Modifier.weight(1f))
-                    LibraryDragHandle(name, dragItems, enabled)
+                    Text(details, color = Muted, fontSize = 12.sp)
                 }
-                Spacer(Modifier.height(4.dp))
-                Text(name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    color = Ink, fontSize = 14.sp, lineHeight = 18.sp)
-                Spacer(Modifier.weight(1f))
-                Text(details, color = Muted, fontSize = 12.sp)
-            }
-        } else {
-            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                InkIcon(if (folder) R.drawable.inkask_ic_folder_open else R.drawable.inkask_ic_file_text, Green, 22)
-                Text(name, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(details, color = Muted, fontSize = 12.sp)
-                LibraryDragHandle(name, dragItems, enabled)
+            } else {
+                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 54.dp).heightIn(min = 58.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    InkIcon(icon, Green, 22)
+                    Text(name, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(details, color = Muted, fontSize = 12.sp)
+                }
             }
         }
+        Checkbox(checked = selected, onCheckedChange = { onSelect() }, enabled = enabled,
+            modifier = selectionControl.align(if (grid) Alignment.TopEnd else Alignment.CenterEnd)
+                .semantics { contentDescription = "选择 $name" })
     }
-}
-
-private data class LibraryDrag(val items: Set<LibraryItem>)
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun LibraryDragHandle(name: String, items: Set<LibraryItem>, enabled: Boolean) {
-    val modifier = if (!enabled) Modifier else Modifier.dragAndDropSource(transferData = {
-        DragAndDropTransferData(ClipData.newPlainText("InkAsk", name), localState = LibraryDrag(items))
-    })
-    Box(modifier.size(44.dp).semantics { contentDescription = "拖动 $name" }, contentAlignment = Alignment.Center) {
-        Text("⠿", color = Muted, fontSize = 19.sp)
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun Modifier.libraryDrop(enabled: Boolean, onDrop: (Set<LibraryItem>) -> Unit): Modifier {
-    val deliver by rememberUpdatedState(onDrop)
-    var active by remember { mutableStateOf(false) }
-    val target = remember {
-        object : DragAndDropTarget {
-            override fun onEntered(event: DragAndDropEvent) { active = true }
-            override fun onExited(event: DragAndDropEvent) { active = false }
-            override fun onEnded(event: DragAndDropEvent) { active = false }
-            override fun onDrop(event: DragAndDropEvent): Boolean {
-                val drag = event.toAndroidDragEvent().localState as? LibraryDrag ?: return false
-                deliver(drag.items)
-                return true
-            }
-        }
-    }
-    return dragAndDropTarget({ event -> enabled && event.toAndroidDragEvent().localState is LibraryDrag }, target)
-        .then(if (active) Modifier.background(PaleGreen, ControlShape) else Modifier)
 }
