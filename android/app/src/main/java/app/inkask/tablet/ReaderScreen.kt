@@ -66,6 +66,7 @@ private data class PdfZoomPivot(
 @Composable
 internal fun ReaderScreen(
     doc: Opened, workspace: Workspace, model: ReadingModel, profile: ModelProfile?, drawerOpen: Boolean,
+    islandPosition: ReaderIslandPosition, onMoveIsland: (ReaderIslandPosition) -> Unit,
     openDrawer: () -> Unit, openLibrary: () -> Unit, openSettings: () -> Unit,
     export: (ExportKind) -> Unit, report: (String) -> Unit,
 ) {
@@ -615,14 +616,12 @@ internal fun ReaderScreen(
             }
         }
         if (selection == null && draggingText == null && WindowInsets.ime.getBottom(density) == 0) {
-            ReaderIsland(Modifier.align(Alignment.BottomCenter).padding(horizontal = 10.dp, vertical = 10.dp)) {
+            ReaderIsland(islandPosition, onMoveIsland) {
                 ReaderButton("显示资料侧栏", R.drawable.inkask_ic_panel_left, action = openDrawer)
                 if (answerPosition == null) {
-                    ReaderButton("上一页", R.drawable.inkask_ic_chevron_left, enabled = page > 1) { go(page - 1) }
                     ReaderButton("页码", label = page.toString(), state = "第 $page 页，共 ${pdf.pageCount} 页", active = true) {
                         pageDialog = true
                     }
-                    ReaderButton("下一页", R.drawable.inkask_ic_chevron_right, enabled = page < pdf.pageCount) { go(page + 1) }
                     if (width >= 320.dp) ReaderButton(
                         if (region) "正在框选" else "框选区域", R.drawable.inkask_ic_highlighter, active = region,
                     ) {
@@ -794,7 +793,17 @@ internal fun ReaderScreen(
     if (pageDialog) {
         var input by remember { mutableStateOf(page.toString()) }
         AlertDialog(onDismissRequest = { pageDialog = false }, title = { Text("跳转页码") },
-            text = { OutlinedTextField(input, { input = it }, singleLine = true, label = { Text("页码") }, supportingText = { Text("共 ${pdf.pageCount} 页") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(input, { input = it }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("页码") }, supportingText = { Text("共 ${pdf.pageCount} 页") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        TextButton(enabled = page > 1, onClick = { go(page - 1); pageDialog = false }) { Text("上一页") }
+                        TextButton(enabled = page < pdf.pageCount, onClick = { go(page + 1); pageDialog = false }) { Text("下一页") }
+                    }
+                }
+            },
             confirmButton = { TextButton(onClick = { input.toIntOrNull()?.let(::go); pageDialog = false }) { Text("跳转") } },
             dismissButton = { TextButton(onClick = { pageDialog = false }) { Text("取消") } })
     }

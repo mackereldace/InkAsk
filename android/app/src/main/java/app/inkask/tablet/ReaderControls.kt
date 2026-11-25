@@ -1,11 +1,8 @@
 package app.inkask.tablet
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,26 +17,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
-
-internal val ReaderIslandClearance = 70.dp
-
-@Composable
-internal fun ReaderIsland(modifier: Modifier, content: @Composable RowScope.() -> Unit) {
-    Surface(
-        modifier = modifier,
-        color = Paper,
-        shape = CircleShape,
-        border = BorderStroke(1.dp, Line),
-        shadowElevation = 8.dp,
-    ) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 6.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            content = content,
-        )
-    }
-}
 
 @Composable
 internal fun ReaderButton(

@@ -1,6 +1,7 @@
 package app.inkask.tablet
 
 import android.content.ClipData
+import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -63,7 +64,9 @@ internal enum class ExportKind(val label: String, val suffix: String) {
 @Composable
 internal fun InkAsk(workspace: Workspace) {
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current.applicationContext
+    val localContext = LocalContext.current
+    val context = localContext.applicationContext
+    val activity = remember(localContext) { localContext.mainActivity() }
     val model = remember(context) { ReadingModel(context) }
     var library by remember { mutableStateOf(Library(emptyList(), emptyList(), emptyMap())) }
     var opened by remember { mutableStateOf<Opened?>(null) }
@@ -75,6 +78,16 @@ internal fun InkAsk(workspace: Workspace) {
     var exportRequest by remember { mutableStateOf<Pair<String, ExportKind>?>(null) }
     var showSettings by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf(model.active()) }
+    val readerLayout = remember(context) { context.getSharedPreferences("reader-layout", Context.MODE_PRIVATE) }
+    var islandPosition by remember(readerLayout) {
+        val edge = ReaderIslandEdge.entries.firstOrNull { it.name == readerLayout.getString("island-edge", null) }
+            ?: ReaderIslandEdge.Bottom
+        mutableStateOf(ReaderIslandPosition(
+            readerLayout.getFloat("island-x", .5f), readerLayout.getFloat("island-y", 1f), edge,
+        ))
+    }
+    SideEffect { activity?.setReaderImmersive(opened != null) }
+    DisposableEffect(activity) { onDispose { activity?.setReaderImmersive(false) } }
 
     fun act(block: suspend () -> Unit) {
         if (busy) return
@@ -177,6 +190,12 @@ internal fun InkAsk(workspace: Workspace) {
                     }
                     ReaderScreen(
                         document, workspace, model, profile, drawerOpen = drawer,
+                        islandPosition = islandPosition,
+                        onMoveIsland = { position ->
+                            islandPosition = position
+                            readerLayout.edit().putFloat("island-x", position.x).putFloat("island-y", position.y)
+                                .putString("island-edge", position.edge.name).apply()
+                        },
                         openDrawer = { drawer = true },
                         openLibrary = { showLibrary(null) },
                         openSettings = { showSettings = true },
