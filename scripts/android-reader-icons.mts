@@ -3,13 +3,14 @@ import { resolve } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-  ArrowDownToLine, BookOpen, ChevronLeft, ChevronRight, CircleHelp, FileText,
-  FolderOpen, Grid2X2, Highlighter, List, Maximize2, Minus, PanelLeft, Plus, RotateCw, X,
+  ArrowDownToLine, BookOpen, ChevronLeft, ChevronRight, CircleHelp, Ellipsis, FileText,
+  FolderOpen, GitBranch, Grid2X2, Highlighter, List, Maximize2, Minus, PanelLeft, Plus, RotateCw, X,
 } from "lucide-react";
 
 const icons = {
   arrow_down_to_line: ArrowDownToLine, book_open: BookOpen, chevron_left: ChevronLeft,
-  chevron_right: ChevronRight, circle_help: CircleHelp, file_text: FileText, folder_open: FolderOpen,
+  chevron_right: ChevronRight, circle_help: CircleHelp, ellipsis: Ellipsis, file_text: FileText,
+  folder_open: FolderOpen, git_branch: GitBranch,
   grid: Grid2X2, highlighter: Highlighter, list: List, maximize: Maximize2, minus: Minus,
   panel_left: PanelLeft, plus: Plus, rotate_cw: RotateCw, close: X,
 };

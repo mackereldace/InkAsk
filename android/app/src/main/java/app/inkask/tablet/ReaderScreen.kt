@@ -5,8 +5,6 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -28,6 +26,7 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -65,8 +64,11 @@ private data class PdfZoomPivot(
 )
 
 @Composable
-internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel, profile: ModelProfile?,
-                          openSettings: () -> Unit, report: (String) -> Unit) {
+internal fun ReaderScreen(
+    doc: Opened, workspace: Workspace, model: ReadingModel, profile: ModelProfile?, drawerOpen: Boolean,
+    openDrawer: () -> Unit, openLibrary: () -> Unit, openSettings: () -> Unit,
+    export: (ExportKind) -> Unit, report: (String) -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val pdf = doc.pdf
     val initial = doc.project.getJSONObject("view")
@@ -100,8 +102,10 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var viewportCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var zoomPivot by remember { mutableStateOf<PdfZoomPivot?>(null) }
-    var directionMenu by remember { mutableStateOf(false) }
     var toolsMenu by remember { mutableStateOf(false) }
+    var pathOpen by remember { mutableStateOf(false) }
+    var answerPicker by remember { mutableStateOf(false) }
+    var detailsNoteId by remember { mutableStateOf<String?>(null) }
     val verticalState = rememberLazyListState(page - 1)
     val horizontalState = rememberLazyListState(page - 1)
     val scroll = if (horizontal) horizontalState else verticalState
@@ -109,6 +113,10 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     val pageLayouts = remember(pdf) { mutableMapOf<Int, PdfPageLayout>() }
     val notes = project.optJSONArray("notes").objects()
     val focused = notes.firstOrNull { it.optString("id") == noteId }
+    val answers = focused?.answerMessages().orEmpty()
+    val focusedMessage = answers.firstOrNull { it.optString("id") == messageId }?.optString("id")
+        ?: answers.lastOrNull()?.optString("id")
+    val answerPosition = focused?.let { it.getString("id") to focusedMessage }
     val timeline = generateSequence(focused) { note -> notes.firstOrNull { it.optString("id") == note.optString("parentId") } }
         .take(notes.size).toList().asReversed()
     val pages = project.optJSONArray("pages").objects().associateBy { it.getInt("page") }
@@ -178,7 +186,9 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         messageId = focused?.optString("parentMessageId")?.ifEmpty { null }
         noteId = focused?.optString("parentId")?.ifEmpty { null }
     }
-    BackHandler(enabled = focused != null || selection != null) { if (selection != null) selection = null else back() }
+    BackHandler(enabled = !drawerOpen && (focused != null || selection != null)) {
+        if (selection != null) selection = null else back()
+    }
 
     fun readSource(source: JSONObject, claim: String) {
         val previewRotation = rotation
@@ -389,6 +399,24 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         pending.start()
     }
 
+    fun recognizePage() {
+        val target = page
+        scanning = scope.launch {
+            try {
+                val text = scanPage(pdf, target)
+                publishProject(withContext(Dispatchers.IO) {
+                    workspace.update(doc.item.id) { current ->
+                        val previous = current.getJSONArray("pages").objects().filterNot { it.getInt("page") == target }
+                        current.put("pages", JSONArray(previous).put(text))
+                    }
+                })
+                if (text.optString("status") == "empty") report("本页没有识别出文字，可框选截图。")
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { report("本页识别失败。") }
+            finally { scanning = null }
+        }
+    }
+
     fun editNote(id: String, edit: (JSONObject) -> Unit) {
         scope.launch {
             try {
@@ -500,33 +528,11 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             return ((extent - crossSize) / 2f).coerceAtLeast(0f)
         }
         SideEffect { paperPixels = with(density) { paperWidth.toPx() } }
+        val answerScale = answerPosition?.let { answerScales[it] } ?: 1f
         Column(Modifier.fillMaxSize()) {
-            if (focused != null) {
-                val focusedId = focused.getString("id")
-                val focusedMessage = messageId ?: focused.optJSONArray("messages").objects()
-                    .lastOrNull { it.optString("role") == "assistant" }?.optString("id")
-                val position = focusedId to focusedMessage
-                val answerScale = answerScales[position] ?: 1f
-                Row(Modifier.fillMaxWidth().height(52.dp).background(Bar).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                        Control("‹ 返回上一层", active = true) { back() }
-                        Control("原始 PDF") { noteId = null; selection = null; messageId = null }
-                        timeline.forEach { branch ->
-                            Text("›", color = Muted)
-                            Control(branch.optString("title").take(18), enabled = branch.getString("id") != noteId) {
-                                val target = branch.getString("id")
-                                val child = timeline.firstOrNull { it.optString("parentId") == target }
-                                activeBranch = child?.optString("id")
-                                messageId = child?.optString("parentMessageId")?.ifEmpty { null }
-                                noteId = target; selection = null
-                            }
-                        }
-                    }
-                    Control("−", "缩小回答") { answerScales[position] = (answerScale - .1f).coerceAtLeast(.6f) }
-                    Text("${(answerScale * 100).toInt()}%", color = Muted, fontSize = 12.sp)
-                    Control("＋", "放大回答") { answerScales[position] = (answerScale + .1f).coerceAtMost(3f) }
-                }
-                HorizontalDivider(color = Line)
+            if (focused != null && answerPosition != null) {
+                val position = answerPosition
+                val focusedId = position.first
                 key(position) {
                     val savedScroll = remember { answerPositions[position] }
                     val answerScroll = remember { ScrollState(savedScroll ?: 0) }
@@ -542,7 +548,6 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                         onZoom = { factor -> answerScales[position] = ((answerScales[position] ?: 1f) * factor).coerceIn(.6f, 3f) },
                         onSource = ::readSource,
                         onStop = { requests[focusedId]?.cancel() },
-                        onMessage = { messageId = it; selection = null; activeBranch = null },
                         onBranch = { parentMessageId, quote ->
                             if (noteId == focusedId && focusedMessage == parentMessageId) {
                                 val target = AnswerTarget(focusedId, parentMessageId, quote)
@@ -559,82 +564,10 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                         onRetry = { question ->
                             request(QuestionSelection(), question, focused.optString("task", "explain"), false, focused, retry = true)
                         },
-                        onDelete = {
-                            if (requests.isNotEmpty()) return@AnswerSheet report("先等待当前回答结束，再删除便签。")
-                            scope.launch {
-                                try {
-                                    publishProject(withContext(Dispatchers.IO) { workspace.removeNote(doc.item.id, focused.getString("id")) })
-                                    back()
-                                } catch (_: Exception) { report("无法删除便签。") }
-                            }
-                        },
                         onChild = { id -> noteId = id; messageId = null; selection = null; activeBranch = null },
-                        onTitle = { value -> editNote(focusedId) { it.put("title", value) } },
                     )
                 }
             } else {
-                fun recognizePage() {
-                        val target = page
-                        scanning = scope.launch {
-                            try {
-                                val text = scanPage(pdf, target)
-                                publishProject(withContext(Dispatchers.IO) {
-                                    workspace.update(doc.item.id) { current ->
-                                        val previous = current.getJSONArray("pages").objects().filterNot { it.getInt("page") == target }
-                                        current.put("pages", JSONArray(previous).put(text))
-                                    }
-                                })
-                                if (text.optString("status") == "empty") report("本页没有识别出文字，可框选截图。")
-                            } catch (error: kotlinx.coroutines.CancellationException) { throw error }
-                            catch (_: Exception) { report("本页识别失败。") }
-                            finally { scanning = null }
-                        }
-                }
-                Row(Modifier.fillMaxWidth().height(52.dp).background(Bar).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Control("‹", "上一页", enabled = page > 1) { go(page - 1) }
-                    Control("$page / ${pdf.pageCount}", "页码", active = true) { pageDialog = true }
-                    Control("›", "下一页", enabled = page < pdf.pageCount) { go(page + 1) }
-                    Spacer(Modifier.weight(1f))
-                    Control("−", "缩小") { zoomFromCenter(scale - .1f) }
-                    Control("${(scale * 100).toInt()}%", "重置缩放") { fitPage() }
-                    Control("＋", "放大") { zoomFromCenter(scale + .1f) }
-                    Box {
-                        Control(if (horizontal) "左右 ▾" else "上下 ▾", "页面拼接方向") { directionMenu = true }
-                        DropdownMenu(expanded = directionMenu, onDismissRequest = { directionMenu = false }, shape = ControlShape,
-                            containerColor = Paper, tonalElevation = 0.dp) {
-                            DropdownMenuItem(text = { Text("上下拼接") }, onClick = { across = 0f; selection = null; horizontal = false; directionMenu = false })
-                            DropdownMenuItem(text = { Text("左右拼接") }, onClick = { across = 0f; selection = null; horizontal = true; directionMenu = false })
-                        }
-                    }
-                    if (width >= 560.dp || region) {
-                        Control(if (region) "正在框选" else "框选区域", active = region) { region = !region; selection = null }
-                    }
-                    Box {
-                        Control("⋯", "阅读工具") { toolsMenu = true }
-                        DropdownMenu(expanded = toolsMenu, onDismissRequest = { toolsMenu = false }, containerColor = Paper) {
-                            DropdownMenuItem(text = { Text("适合宽度") }, onClick = { zoomFromCenter(fitScale); toolsMenu = false })
-                            DropdownMenuItem(text = { Text("旋转页面") }, onClick = {
-                                across = 0f; selection = null; rotation = (rotation + 90) % 360; toolsMenu = false
-                            })
-                            if (width < 560.dp && !region) DropdownMenuItem(text = { Text("框选区域") }, onClick = {
-                                region = true; selection = null; toolsMenu = false
-                            })
-                            if (scanning != null) DropdownMenuItem(text = { Text("取消识别") }, onClick = {
-                                scanning?.cancel(); toolsMenu = false
-                            }) else if (rawText.isBlank() || recognized != null) DropdownMenuItem(
-                                text = { Text(if (recognized != null) "重新识别" else "识别本页") },
-                                onClick = { recognizePage(); toolsMenu = false },
-                            )
-                        }
-                    }
-                }
-                HorizontalDivider(color = Line)
-                if (profile == null) {
-                    Row(Modifier.fillMaxWidth().background(PaleGreen).padding(horizontal = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("阅读已就绪。配置模型 API 后，即可在便签中获得 AI 回答。", color = Muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        Control("如何配置", action = openSettings)
-                    }
-                }
                 val noteAnchors = notes.filterNot { it.has("parentId") }.flatMapIndexed { index, note ->
                     val root = note.getJSONObject("anchor")
                     root.anchorParts().map { PageNote(index + 1, note, it) }
@@ -679,10 +612,87 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     contentPadding = PaddingValues(top = leading, bottom = trailing)) {
                     items(pdf.pageCount) { item(it + 1) }
                 }
-                HorizontalDivider(color = Line)
-                Text(if (scanning != null) "正在识别第 $page 页"
-                    else "${notes.count { !it.has("parentId") }} 条便签 · ${profile?.model ?: "本地阅读"}", color = Muted, fontSize = 11.sp,
-                    modifier = Modifier.fillMaxWidth().background(Bar).padding(horizontal = 22.dp, vertical = 7.dp))
+            }
+        }
+        if (selection == null && draggingText == null && WindowInsets.ime.getBottom(density) == 0) {
+            ReaderIsland(Modifier.align(Alignment.BottomCenter).padding(horizontal = 10.dp, vertical = 10.dp)) {
+                ReaderButton("显示资料侧栏", R.drawable.inkask_ic_panel_left, action = openDrawer)
+                if (answerPosition == null) {
+                    ReaderButton("上一页", R.drawable.inkask_ic_chevron_left, enabled = page > 1) { go(page - 1) }
+                    ReaderButton("页码", label = page.toString(), state = "第 $page 页，共 ${pdf.pageCount} 页", active = true) {
+                        pageDialog = true
+                    }
+                    ReaderButton("下一页", R.drawable.inkask_ic_chevron_right, enabled = page < pdf.pageCount) { go(page + 1) }
+                    if (width >= 320.dp) ReaderButton(
+                        if (region) "正在框选" else "框选区域", R.drawable.inkask_ic_highlighter, active = region,
+                    ) {
+                        region = !region
+                        selection = null
+                    }
+                } else {
+                    ReaderButton("返回上一层", R.drawable.inkask_ic_chevron_left, action = ::back)
+                    ReaderButton("便签路径", R.drawable.inkask_ic_git_branch, state = "第 ${timeline.size} 层") {
+                        pathOpen = true
+                    }
+                }
+                Box {
+                    ReaderButton("阅读工具", R.drawable.inkask_ic_ellipsis, active = scanning != null) { toolsMenu = true }
+                    DropdownMenu(
+                        expanded = toolsMenu, onDismissRequest = { toolsMenu = false },
+                        modifier = Modifier.widthIn(min = 218.dp, max = 300.dp).heightIn(max = 470.dp),
+                        shape = ReaderCardShape, containerColor = Paper, tonalElevation = 0.dp,
+                    ) {
+                        Text(doc.item.name, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            val zoom = answerPosition?.let { answerScale } ?: scale
+                            fun changeZoom(amount: Float) {
+                                if (answerPosition == null) zoomFromCenter(scale + amount)
+                                else answerScales[answerPosition] = (answerScale + amount).coerceIn(.6f, 3f)
+                            }
+                            ReaderButton(if (answerPosition == null) "缩小" else "缩小回答", R.drawable.inkask_ic_minus) { changeZoom(-.1f) }
+                            ReaderButton("重置缩放", label = "${(zoom * 100).roundToInt()}%") {
+                                if (answerPosition == null) fitPage() else answerScales[answerPosition] = 1f
+                            }
+                            ReaderButton(if (answerPosition == null) "放大" else "放大回答", R.drawable.inkask_ic_plus) { changeZoom(.1f) }
+                        }
+                        if (answerPosition == null) {
+                            DropdownMenuItem(text = { Text(if (horizontal) "切换为上下拼接" else "切换为左右拼接") }, onClick = {
+                                across = 0f; selection = null; horizontal = !horizontal; toolsMenu = false
+                            })
+                            DropdownMenuItem(text = { Text("旋转页面") }, onClick = {
+                                across = 0f; selection = null; rotation = (rotation + 90) % 360; toolsMenu = false
+                            })
+                            if (width < 320.dp) DropdownMenuItem(text = { Text(if (region) "退出框选" else "框选区域") }, onClick = {
+                                region = !region; selection = null; toolsMenu = false
+                            })
+                            if (scanning != null) DropdownMenuItem(text = { Text("取消识别") }, onClick = {
+                                scanning?.cancel(); toolsMenu = false
+                            }) else if (rawText.isBlank() || recognized != null) DropdownMenuItem(
+                                text = { Text(if (recognized != null) "重新识别" else "识别本页") },
+                                onClick = { recognizePage(); toolsMenu = false },
+                            )
+                        } else {
+                            if (answers.size > 1) DropdownMenuItem(text = { Text("切换本便签的回答") }, onClick = {
+                                toolsMenu = false; answerPicker = true
+                            })
+                            DropdownMenuItem(text = { Text("便签信息") }, onClick = {
+                                toolsMenu = false; detailsNoteId = answerPosition.first
+                            })
+                        }
+                        HorizontalDivider(color = Line)
+                        ExportKind.entries.forEach { kind ->
+                            DropdownMenuItem(text = { Text("导出${kind.label}") }, onClick = {
+                                toolsMenu = false
+                                export(kind)
+                            })
+                        }
+                        DropdownMenuItem(text = { Text("帮助与设置") }, onClick = { toolsMenu = false; openSettings() })
+                        DropdownMenuItem(text = { Text("返回资料库") }, onClick = { toolsMenu = false; openLibrary() })
+                    }
+                }
             }
         }
         selection?.let { selected ->
@@ -719,10 +729,72 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         }
     }
 
+    if (pathOpen && timeline.isNotEmpty()) {
+        val originPage = timeline.first().getJSONObject("anchor").getInt("page")
+        ReaderPath(doc.item.name, originPage, timeline, focusedMessage,
+            onPdf = {
+                pathOpen = false
+                activeBranch = null
+                selection = null
+                located = null
+                go(originPage)
+            },
+            onNote = { index ->
+                val child = timeline.getOrNull(index + 1)
+                activeBranch = child?.optString("id")
+                messageId = child?.optString("parentMessageId")?.ifBlank { null }
+                noteId = timeline[index].getString("id")
+                selection = null
+                pathOpen = false
+            },
+            onDismiss = { pathOpen = false },
+        )
+    }
+    if (answerPicker && answers.size > 1) {
+        AlertDialog(
+            onDismissRequest = { answerPicker = false },
+            title = { Text("切换本便签的回答") },
+            text = {
+                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
+                    items(answers.size) { index ->
+                        val id = answers[index].getString("id")
+                        Control("回答 ${index + 1}", active = id == focusedMessage) {
+                            messageId = id
+                            selection = null
+                            activeBranch = null
+                            answerPicker = false
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { answerPicker = false }) { Text("关闭") } },
+            containerColor = Paper,
+        )
+    }
+    notes.firstOrNull { it.optString("id") == detailsNoteId }?.let { current ->
+        val id = current.getString("id")
+        ReaderNoteDetails(current, canDelete = requests.isEmpty(),
+            onSave = { value -> editNote(id) { it.put("title", value) }; detailsNoteId = null },
+            onDelete = {
+                if (requests.isNotEmpty()) report("先等待当前回答结束，再删除便签。") else {
+                    detailsNoteId = null
+                    scope.launch {
+                        try {
+                            publishProject(withContext(Dispatchers.IO) { workspace.removeNote(doc.item.id, id) })
+                            if (noteId == id) back()
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                        catch (_: Exception) { report("无法删除便签。") }
+                    }
+                }
+            },
+            onDismiss = { detailsNoteId = null },
+        )
+    }
+
     if (pageDialog) {
         var input by remember { mutableStateOf(page.toString()) }
         AlertDialog(onDismissRequest = { pageDialog = false }, title = { Text("跳转页码") },
-            text = { OutlinedTextField(input, { input = it }, singleLine = true, label = { Text("页码") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) },
+            text = { OutlinedTextField(input, { input = it }, singleLine = true, label = { Text("页码") }, supportingText = { Text("共 ${pdf.pageCount} 页") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)) },
             confirmButton = { TextButton(onClick = { input.toIntOrNull()?.let(::go); pageDialog = false }) { Text("跳转") } },
             dismissButton = { TextButton(onClick = { pageDialog = false }) { Text("取消") } })
     }

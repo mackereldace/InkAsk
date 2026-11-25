@@ -35,7 +35,6 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
@@ -91,9 +90,9 @@ internal fun AnswerSheet(
     savedScroll: Int?,
     core: SharedReadingCore, attachments: Map<String, AttachmentPreview>, children: List<JSONObject>,
     activeBranch: String?, pendingQuote: AnswerQuote?, onZoom: (Float) -> Unit,
-    onSource: (JSONObject, String) -> Unit, onStop: () -> Unit, onMessage: (String) -> Unit,
-    onBranch: (String, AnswerQuote) -> Unit, onChild: (String) -> Unit, onDelete: () -> Unit,
-    onResumeDraft: () -> Unit, onRetry: (String) -> Unit, onTitle: (String) -> Unit,
+    onSource: (JSONObject, String) -> Unit, onStop: () -> Unit,
+    onBranch: (String, AnswerQuote) -> Unit, onChild: (String) -> Unit,
+    onResumeDraft: () -> Unit, onRetry: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val anchor = note.getJSONObject("anchor")
@@ -106,10 +105,7 @@ internal fun AnswerSheet(
     val answer = answers.firstOrNull { it.optString("id") == selectedMessage } ?: answers.lastOrNull()
     val answerId = answer?.optString("id")
     val question = if (answer == null) null else messages.takeWhile { it !== answer }.lastOrNull { it.optString("role") == "user" }
-    var choosingAnswer by remember { mutableStateOf(false) }
     var sourceExpanded by remember { mutableStateOf(answer == null) }
-    var detailsExpanded by remember { mutableStateOf(false) }
-    var confirmDeletion by remember { mutableStateOf(false) }
     var reader by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var textView by remember(answerId) { mutableStateOf<TextView?>(null) }
     var openFormula by remember { mutableStateOf<String?>(null) }
@@ -151,32 +147,6 @@ internal fun AnswerSheet(
             modifier = Modifier.widthIn(max = 830.dp).fillMaxWidth()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (answer == null) "新的提问" else "阅读回答",
-                        color = Ink, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
-                    if (answers.size > 1) Box {
-                        val number = answers.indexOf(answer) + 1
-                        Control("回答 $number ▾", "切换本便签的回答") { choosingAnswer = true }
-                        DropdownMenu(expanded = choosingAnswer, onDismissRequest = { choosingAnswer = false }, containerColor = Paper) {
-                            answers.forEachIndexed { index, turn ->
-                                DropdownMenuItem(text = { Text("回答 ${index + 1}") }, onClick = {
-                                    choosingAnswer = false
-                                    onMessage(turn.getString("id"))
-                                })
-                            }
-                        }
-                    }
-                    Control(if (detailsExpanded) "▾ 便签信息" else "▸ 便签信息") { detailsExpanded = !detailsExpanded }
-                }
-                HorizontalDivider(color = Line)
-                if (detailsExpanded) {
-                    val saved = note.optString("title")
-                    var title by remember(saved) { mutableStateOf(saved) }
-                    OutlinedTextField(title, { title = it.take(100) }, label = { Text("便签标题") },
-                        singleLine = true, modifier = Modifier.fillMaxWidth())
-                    Control("保存标题", enabled = title.isNotBlank() && title.trim() != saved) { onTitle(title.trim()) }
-                    Control("删除此便签及子追问", enabled = !busy) { confirmDeletion = true }
-                }
                 Row(Modifier.fillMaxWidth().background(PaleGreen, ControlShape)) {
                     val title = if (note.has("parentId")) "选中的上一层回答" else "选中的 PDF 原文 · 第 $pageLabel 页"
                     Control("${if (sourceExpanded) "▾" else "▸"} $title") { sourceExpanded = !sourceExpanded }
@@ -283,12 +253,8 @@ internal fun AnswerSheet(
                 }
             }
         }
-        if (bottomSpace > 0) Spacer(Modifier.height(with(density) { bottomSpace.toDp() }))
+        Spacer(Modifier.height(ReaderIslandClearance + with(density) { bottomSpace.toDp() }))
     }
-    if (confirmDeletion) AlertDialog(onDismissRequest = { confirmDeletion = false }, title = { Text("删除便签？") },
-        text = { Text("所选便签及其关联的追问分支将一起删除。") },
-        confirmButton = { TextButton(onClick = { confirmDeletion = false; onDelete() }) { Text("删除") } },
-        dismissButton = { TextButton(onClick = { confirmDeletion = false }) { Text("取消") } })
     openFormula?.let { FormulaDialog(it) { openFormula = null } }
 }
 

@@ -54,7 +54,7 @@ internal val ControlShape = RoundedCornerShape(9.dp)
 internal val ReaderCardShape = RoundedCornerShape(14.dp)
 
 internal data class Opened(val item: PdfItem, val project: JSONObject, val pdf: NativePdf)
-private enum class ExportKind(val label: String, val suffix: String) {
+internal enum class ExportKind(val label: String, val suffix: String) {
     PROJECT("完整项目 (.inkask)", ".inkask"),
     MARKDOWN("笔记 Markdown", ".md"),
     NOTES("笔记目录 (.zip)", "-笔记目录.zip"),
@@ -73,7 +73,6 @@ internal fun InkAsk(workspace: Workspace) {
     var trouble by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var exportRequest by remember { mutableStateOf<Pair<String, ExportKind>?>(null) }
-    var exportMenu by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf(model.active()) }
 
@@ -136,38 +135,20 @@ internal fun InkAsk(workspace: Workspace) {
 
     Box(Modifier.fillMaxSize().background(Desk).safeDrawingPadding().imePadding()) {
         Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().height(50.dp).background(Bar).padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Control("▣", "显示资料侧栏") { drawer = !drawer }
-                Spacer(Modifier.width(10.dp))
-                InkIcon(R.drawable.inkask_ic_book_open, color = Muted)
-                Text("阅读空间", color = Muted, modifier = Modifier.clickable { showLibrary(null) }.padding(6.dp))
-                opened?.let {
-                    Text("›", color = Muted, modifier = Modifier.padding(horizontal = 10.dp))
-                    Text(it.item.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f))
+            if (opened == null) {
+                Row(
+                    Modifier.fillMaxWidth().height(50.dp).background(Bar).padding(horizontal = 20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Control("▣", "显示资料侧栏") { drawer = !drawer }
                     Spacer(Modifier.width(10.dp))
-                    if (busy) Text("正在处理…", color = Muted, fontSize = 12.sp)
-                    Spacer(Modifier.width(14.dp))
-                    Box {
-                        Control("↓ 导出", "导出") { exportMenu = true }
-                        DropdownMenu(expanded = exportMenu, onDismissRequest = { exportMenu = false }, shape = ControlShape,
-                            containerColor = Paper, tonalElevation = 0.dp) {
-                            ExportKind.entries.forEach { kind ->
-                                DropdownMenuItem(text = { Text(kind.label) }, onClick = {
-                                    exportMenu = false
-                                    exportRequest = it.item.id to kind
-                                    export.launch(it.item.name.substringBeforeLast('.') + kind.suffix)
-                                })
-                            }
-                        }
-                    }
-                } ?: Spacer(Modifier.weight(1f))
-                Control("?", "帮助与设置") { showSettings = true }
+                    InkIcon(R.drawable.inkask_ic_book_open, color = Muted)
+                    Text("阅读空间", color = Muted, modifier = Modifier.clickable { showLibrary(null) }.padding(6.dp))
+                    Spacer(Modifier.weight(1f))
+                    Control("?", "帮助与设置") { showSettings = true }
+                }
+                HorizontalDivider(color = Line)
             }
-            HorizontalDivider(color = Line)
             if (trouble.isNotBlank()) {
                 Row(Modifier.fillMaxWidth().background(Color(0xFFFFF2DB)).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(trouble, Modifier.weight(1f), fontSize = 13.sp)
@@ -194,7 +175,17 @@ internal fun InkAsk(workspace: Workspace) {
                     DisposableEffect(document.pdf) {
                         onDispose { scope.launch(Dispatchers.IO) { document.pdf.close() } }
                     }
-                    ReaderScreen(document, workspace, model, profile, { showSettings = true }, { trouble = it })
+                    ReaderScreen(
+                        document, workspace, model, profile, drawerOpen = drawer,
+                        openDrawer = { drawer = true },
+                        openLibrary = { showLibrary(null) },
+                        openSettings = { showSettings = true },
+                        export = { kind ->
+                            exportRequest = document.item.id to kind
+                            export.launch(document.item.name.substringBeforeLast('.') + kind.suffix)
+                        },
+                        report = { trouble = it },
+                    )
                 }
             }
         }
