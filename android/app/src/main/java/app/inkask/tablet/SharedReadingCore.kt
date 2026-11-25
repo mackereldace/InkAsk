@@ -16,6 +16,12 @@ internal class SharedReadingCore(context: Context) {
         JSONObject(run("context", JSONObject().put("project", project).put("note", note)
             .put("question", question).put("template", template)))
 
+    fun branch(project: JSONObject, parentId: String, messageId: String, anchor: JSONObject,
+               template: JSONObject, id: String, createdAt: Long): JSONObject =
+        JSONObject(run("branch", JSONObject().put("project", project).put("parentId", parentId)
+            .put("messageId", messageId).put("anchor", anchor).put("template", template)
+            .put("id", id).put("createdAt", createdAt)))
+
     fun citations(raw: String, sources: List<JSONObject>): JSONObject =
         JSONObject(run("citations", JSONObject().put("raw", raw).put("sources", JSONArray(sources))))
 

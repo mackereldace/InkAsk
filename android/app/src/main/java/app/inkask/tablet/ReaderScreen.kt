@@ -45,9 +45,19 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 import kotlin.math.abs
 
-private data class QuestionSelection(val range: PdfSelection, val parent: JSONObject? = null,
-                                     val branchQuote: String = "", val offset: Int? = null, val parentMessage: String? = null,
-                                     val location: Offset? = null, val submission: QuestionSubmission = QuestionSubmission())
+private data class AnswerTarget(val noteId: String, val messageId: String, val quote: AnswerQuote)
+private data class QuestionSelection(
+    val range: PdfSelection? = null,
+    val answer: AnswerTarget? = null,
+    val draft: JSONObject? = null,
+    val location: Offset? = answer?.quote?.location,
+    val submission: QuestionSubmission = draft?.getString("id")?.let { QuestionSubmission(noteId = it) } ?: QuestionSubmission(),
+) {
+    val quote get() = answer?.quote?.quote
+        ?: draft?.optString("branchQuote")?.takeIf { it.isNotBlank() }
+        ?: draft?.optJSONObject("anchor")?.optString("quote")
+        ?: range?.quote.orEmpty()
+}
 private data class SourcePreviewPart(val label: String, val text: String, val range: PdfRange?, val image: ByteArray?)
 private data class SourcePreview(val source: JSONObject, val size: PageSize, val parts: List<SourcePreviewPart>)
 private data class PdfZoomPivot(
@@ -78,8 +88,6 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     var noteId by remember { mutableStateOf<String?>(null) }
     var messageId by remember { mutableStateOf<String?>(null) }
     val answerPositions = remember { mutableMapOf<Pair<String, String?>, Int>() }
-    val drafts = remember { mutableStateMapOf<String, String>() }
-    val draftJobs = remember { mutableMapOf<String, Job>() }
     val replies = remember { mutableStateMapOf<String, String>() }
     val requests = remember { mutableStateMapOf<String, Job>() }
     var scanning by remember { mutableStateOf<Job?>(null) }
@@ -87,7 +95,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     var pageDialog by remember { mutableStateOf(false) }
     var pendingJump by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var paperPixels by remember { mutableFloatStateOf(0f) }
-    var answerScale by remember { mutableFloatStateOf(1f) }
+    val answerScales = remember { mutableStateMapOf<Pair<String, String?>, Float>() }
+    var activeBranch by remember { mutableStateOf<String?>(null) }
     var across by remember { mutableFloatStateOf(0f) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var viewportCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
@@ -166,6 +175,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     }
     fun back() {
         selection = null
+        activeBranch = focused?.optString("id")
         messageId = focused?.optString("parentMessageId")?.ifEmpty { null }
         noteId = focused?.optString("parentId")?.ifEmpty { null }
     }
@@ -195,8 +205,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
 
     fun request(selected: QuestionSelection, question: String, task: String, screenshot: Boolean,
                 existing: JSONObject? = null, retry: Boolean = false, externalImages: List<Uri> = emptyList(),
-                templateId: String? = null, saveOnly: Boolean = false) {
-        val existingId = existing?.getString("id")
+                templateId: String? = null, saveOnly: Boolean = false, retainedImages: List<String>? = null) {
+        val existingId = (existing ?: selected.draft)?.getString("id")
         val submission = selected.submission
         val askId = existingId ?: submission.noteId
         if (askId in requests) return
@@ -207,8 +217,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         val configured = profile
         if (!saveOnly && configured == null) { openSettings(); return }
         val range = selected.range
-        val needsImage = range.quote.isBlank() && existing == null && selected.parent == null
-        val captures = if (screenshot || needsImage) range.fragments else emptyList()
+        val needsImage = range?.quote?.isBlank() == true
+        val captures = if (screenshot || needsImage) range?.fragments.orEmpty() else emptyList()
         val captureRotation = rotation
         if (captures.size + externalImages.size > 4) {
             report(if (captures.size > 4) "跨页选区超过 4 页，请缩小截图范围，或取消附图后使用完整选文提问。"
@@ -220,8 +230,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             return
         }
         report("")
-        if (!retry) draftJobs.remove(askId)?.cancel()
         val origin = noteId to messageId
+        val draftMessageCount = selected.draft?.getJSONArray("messages")?.length()
         val pending = scope.launch(start = CoroutineStart.LAZY) {
             val now = System.currentTimeMillis()
             var answer: JSONObject? = null
@@ -230,7 +240,6 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             val output = StringBuilder()
             try {
                 val result = withContext(Dispatchers.IO) {
-                    val anchor = range.anchor(pdf::size)
                     val text = question.trim().ifEmpty { model.taskLabel(task) }
                     val files = captures.map { part ->
                         val source = JSONObject().put("page", part.page).put("rect", part.bounds().pdfRect(pdf.size(part.page)))
@@ -241,46 +250,34 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     }
                     var draft: RequestDraft? = null
                     val updated = workspace.updateWithImages(doc.item.id, files, skip = {
-                        it.hasCommittedSubmission(askId, submission, saveOnly, retryTarget)
+                        it.hasCommittedSubmission(askId, submission, saveOnly, retryTarget, draftMessageCount)
                     }) { content, ids ->
                         val notes = content.getJSONArray("notes")
                         val index = notes.objects().indexOfFirst { it.getString("id") == askId }
                         val saved = notes.optJSONObject(index)
-                        val template = model.template(content, task, templateId ?: saved?.optString("templateId"))
-                        val note = saved ?: JSONObject().put("id", askId).put("title", text.take(100))
-                            .put("anchor", anchor).put("collapsed", false).put("task", template.getString("task"))
-                            .put("templateId", template.getString("id")).put("draft", "")
-                            .put("draftAssetIds", JSONArray()).put("messages", JSONArray())
+                        require(existingId == null || saved != null) { "这条便签已不存在。" }
+                        val taskTemplate = model.template(content, task, templateId ?: saved?.optString("templateId").takeIf { retry })
+                        val template = if (retry) {
+                            saved?.optJSONArray("messages").objects().lastOrNull { it.optString("role") == "user" }
+                                ?.optJSONObject("template") ?: taskTemplate
+                        } else taskTemplate
+                        val note = saved ?: selected.answer?.let { target ->
+                            workspace.core.branch(content, target.noteId, target.messageId, target.quote.anchor(),
+                                template, askId, now)
+                        } ?: JSONObject().put("id", askId).put("title", text.take(100))
+                            .put("anchor", requireNotNull(range).anchor(pdf::size)).put("collapsed", false)
+                            .put("draft", "").put("draftAssetIds", JSONArray()).put("messages", JSONArray())
                             .put("inheritedHistory", JSONArray()).put("createdAt", now)
-                        selected.parent?.takeIf { saved == null }?.let { parent ->
-                            val parentId = parent.getString("id")
-                            val parentMessage = requireNotNull(selected.parentMessage)
-                            val currentParent = notes.objects().firstOrNull { it.optString("id") == parentId }
-                            require(currentParent?.optJSONArray("messages").objects().any {
-                                it.optString("id") == parentMessage && it.optString("role") == "assistant"
-                            }) { "所选回答已不存在。" }
-                            val messages = parent.optJSONArray("messages").objects()
-                            note.put("parentId", parentId).put("branchQuote", selected.branchQuote).put("parentMessageId", parentMessage)
-                            val parentIndex = messages.indexOfFirst { it.optString("id") == parentMessage }
-                            require(parentIndex >= 0) { "无法定位追问所使用的回答。" }
-                            val through = messages.take(parentIndex + 1)
-                            selected.offset?.let { offset ->
-                                note.put("answerAnchor", JSONObject().put("start", offset)
-                                    .put("end", offset + selected.branchQuote.length).put("quote", selected.branchQuote))
-                            }
-                            note.put("inheritedHistory", JSONArray((parent.optJSONArray("inheritedHistory").objects() + through).map {
-                                JSONObject().put("role", it.getString("role")).put("content", it.optString("content"))
-                                    .put("assetIds", it.optJSONArray("assetIds") ?: JSONArray())
-                            }))
-                        }
+                        if (!retry) note.put("task", template.getString("task")).put("templateId", template.getString("id"))
                         val messages = note.getJSONArray("messages")
                         val lastAssistant = messages.optJSONObject(messages.length() - 1)?.takeIf {
                             retry && it.optString("role") == "assistant"
                         }
                         if (lastAssistant != null) messages.remove(messages.length() - 1)
                         val priorUser = messages.objects().lastOrNull { it.optString("role") == "user" }?.takeIf { retry }
-                        val assetIds = priorUser?.optJSONArray("assetIds")
-                            ?: JSONArray(note.optJSONArray("draftAssetIds").strings() + ids)
+                        val savedImages = note.optJSONArray("draftAssetIds").strings()
+                        val keptImages = retainedImages?.let { savedImages.intersect(it.toSet()).toList() } ?: savedImages
+                        val assetIds = priorUser?.optJSONArray("assetIds") ?: JSONArray(keptImages + ids)
                         require(retry || assetIds.length() <= 4) { "每次最多附 4 张图片。" }
                         if (!retry) note.put("draftAssetIds", assetIds)
                         if (captures.isNotEmpty() && saved == null) {
@@ -288,7 +285,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                             if (captures.size > 1) note.put("sourceAssetIds", JSONArray(ids.take(captures.size)))
                         }
                         if (saveOnly) {
-                            note.put("draft", question)
+                            note.put("draft", question).put("draftSaveToken", submission.userId)
                             if (index == -1) notes.put(note) else notes.put(index, note)
                             draft = RequestDraft(content, "", emptyList(), emptyList(), null)
                             return@updateWithImages
@@ -326,7 +323,10 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                             .put("assetIds", JSONArray()).put("prompt", body)
                             .put("template", template).put("sources", sources).put("coverage", coverage).put("history", history)
                         messages.put(assistant)
-                        if (priorUser == null) note.put("draft", "").put("draftAssetIds", JSONArray())
+                        if (priorUser == null) {
+                            note.put("draft", "").put("draftAssetIds", JSONArray())
+                            note.remove("draftSaveToken")
+                        }
                         if (index == -1) notes.put(note) else notes.put(index, note)
                         draft = RequestDraft(content, body, requestHistory, requestImages, assistant)
                     }
@@ -334,9 +334,10 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                 }
                 answer = result.answer
                 publishProject(result.project)
-                if (!retry) drafts.remove(askId)
-                if (selection === selected) selection = null
-                if ((noteId to messageId) == origin) {
+                val open = selection?.submission
+                if (open == submission) selection = null
+                if ((noteId to messageId) == origin && (open == null || open == submission)) {
+                    activeBranch = null
                     noteId = askId
                     messageId = answer?.getString("id") ?: retryTarget?.id
                 }
@@ -399,48 +400,6 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                 })
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) { report(error.message ?: "便签无法保存。") }
-        }
-    }
-
-    fun editDraft(note: JSONObject, value: String) {
-        val id = note.getString("id")
-        val messages = note.getJSONArray("messages").length()
-        drafts[id] = value
-        draftJobs.remove(id)?.cancel()
-        draftJobs[id] = scope.launch {
-            delay(150)
-            try {
-                withContext(Dispatchers.IO) {
-                    workspace.update(doc.item.id) { content ->
-                        content.getJSONArray("notes").objects().firstOrNull {
-                            it.getString("id") == id && it.getJSONArray("messages").length() == messages
-                        }?.put("draft", value)
-                    }
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (_: Exception) { report("草稿无法保存。") }
-        }
-    }
-
-    fun attachToDraft(id: String, uris: List<Uri>) {
-        if (id in requests) return
-        scope.launch {
-            try {
-                publishProject(withContext(Dispatchers.IO) {
-                    require(uris.size <= 4) { "每次最多附 4 张图片。" }
-                    val images = uris.map { uri ->
-                        val (name, bytes) = workspace.readImage(uri)
-                        QuestionImage(name, bytes)
-                    }
-                    workspace.updateWithImages(doc.item.id, images) { content, ids ->
-                        val note = content.getJSONArray("notes").objects().first { it.getString("id") == id }
-                        val all = note.getJSONArray("draftAssetIds").strings() + ids
-                        require(all.size <= 4) { "每次最多附 4 张图片。" }
-                        note.put("draftAssetIds", JSONArray(all))
-                    }
-                })
-            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { report(error.message ?: "图片无法读取。") }
         }
     }
 
@@ -544,6 +503,11 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         SideEffect { paperPixels = with(density) { paperWidth.toPx() } }
         Column(Modifier.fillMaxSize()) {
             if (focused != null) {
+                val focusedId = focused.getString("id")
+                val focusedMessage = messageId ?: focused.optJSONArray("messages").objects()
+                    .lastOrNull { it.optString("role") == "assistant" }?.optString("id")
+                val position = focusedId to focusedMessage
+                val answerScale = answerScales[position] ?: 1f
                 Row(Modifier.fillMaxWidth().height(52.dp).background(Bar).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
                         Control("‹ 返回上一层", active = true) { back() }
@@ -552,62 +516,49 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                             Text("›", color = Muted)
                             Control(branch.optString("title").take(18), enabled = branch.getString("id") != noteId) {
                                 val target = branch.getString("id")
-                                messageId = timeline.firstOrNull { it.optString("parentId") == target }
-                                    ?.optString("parentMessageId")?.ifEmpty { null }
+                                val child = timeline.firstOrNull { it.optString("parentId") == target }
+                                activeBranch = child?.optString("id")
+                                messageId = child?.optString("parentMessageId")?.ifEmpty { null }
                                 noteId = target; selection = null
                             }
                         }
                     }
-                    Control("−", "缩小回答") { answerScale = (answerScale - .1f).coerceAtLeast(.6f) }
+                    Control("−", "缩小回答") { answerScales[position] = (answerScale - .1f).coerceAtLeast(.6f) }
                     Text("${(answerScale * 100).toInt()}%", color = Muted, fontSize = 12.sp)
-                    Control("＋", "放大回答") { answerScale = (answerScale + .1f).coerceAtMost(3f) }
+                    Control("＋", "放大回答") { answerScales[position] = (answerScale + .1f).coerceAtMost(3f) }
                 }
                 HorizontalDivider(color = Line)
-                val focusedId = focused.getString("id")
-                val focusedMessage = messageId ?: focused.optJSONArray("messages").objects()
-                    .lastOrNull { it.optString("role") == "assistant" }?.optString("id")
-                val position = focusedId to focusedMessage
                 key(position) {
-                    val answerScroll = remember { ScrollState(answerPositions[position] ?: 0) }
+                    val savedScroll = remember { answerPositions[position] }
+                    val answerScroll = remember { ScrollState(savedScroll ?: 0) }
                     DisposableEffect(answerScroll) { onDispose { answerPositions[position] = answerScroll.value } }
                     val receiving = focusedId in requests
-                    val latestMessage = focused.optJSONArray("messages").objects().lastOrNull()
-                    val submission = remember(focusedId, latestMessage?.optString("id")) { QuestionSubmission(noteId = focusedId) }
                     val attachments = project.optJSONArray("assets").objects().associate {
                         val id = it.getString("id")
                         id to AttachmentPreview(id, it.getString("name"), file = workspace.assetFile(doc.item.id, it))
                     }
                     AnswerSheet(focused, focusedMessage, replies[focusedId], answerScale, receiving,
-                        answerScroll, workspace.core, attachments, notes.filter { it.optString("parentId") == focusedId },
-                        templates = model.templates(project),
-                        onZoom = { factor -> answerScale = (answerScale * factor).coerceIn(.6f, 3f) },
+                        answerScroll, savedScroll, workspace.core, attachments, notes.filter { it.optString("parentId") == focusedId },
+                        activeBranch = activeBranch, pendingQuote = selection?.answer?.quote,
+                        onZoom = { factor -> answerScales[position] = ((answerScales[position] ?: 1f) * factor).coerceIn(.6f, 3f) },
                         onSource = ::readSource,
                         onStop = { requests[focusedId]?.cancel() },
-                        onMessage = { messageId = it },
-                        onBranch = { parentMessageId, selected ->
-                            scope.launch {
-                                val anchor = focused.getJSONObject("anchor")
-                                val range = withContext(Dispatchers.IO) { anchor.pdfSelection(pdf::size) }
-                                val parent = JSONObject(focused.toString())
-                                val turns = parent.getJSONArray("messages")
-                                if (turns.objects().any {
-                                    it.optString("id") == parentMessageId && it.optString("status") != "streaming"
-                                } && noteId == focusedId) {
-                                    val active = selection
-                                    if (active?.parent?.optString("id") != focusedId || active.parentMessage != parentMessageId ||
-                                        active.offset != selected.start || active.branchQuote != selected.quote) {
-                                        selection = QuestionSelection(range, parent, selected.quote, selected.start, parentMessageId, selected.location)
-                                    }
+                        onMessage = { messageId = it; selection = null; activeBranch = null },
+                        onBranch = { parentMessageId, quote ->
+                            if (noteId == focusedId && focusedMessage == parentMessageId) {
+                                val target = AnswerTarget(focusedId, parentMessageId, quote)
+                                val current = selection?.takeIf { it.answer?.noteId == focusedId && it.answer.messageId == parentMessageId }
+                                if (current == null) {
+                                    selection = QuestionSelection(answer = target)
+                                    activeBranch = null
+                                } else if (current.submission.noteId !in requests) {
+                                    selection = current.copy(answer = target, location = quote.location)
                                 }
                             }
                         },
-                        onRequest = { question, retry ->
-                            scope.launch {
-                                val anchor = focused.getJSONObject("anchor")
-                                val range = withContext(Dispatchers.IO) { anchor.pdfSelection(pdf::size) }
-                                request(QuestionSelection(range, submission = submission), question,
-                                    focused.optString("task", "explain"), false, focused, retry)
-                            }
+                        onResumeDraft = { selection = QuestionSelection(draft = focused) },
+                        onRetry = { question ->
+                            request(QuestionSelection(), question, focused.optString("task", "explain"), false, focused, retry = true)
                         },
                         onDelete = {
                             if (requests.isNotEmpty()) return@AnswerSheet report("先等待当前回答结束，再删除便签。")
@@ -618,18 +569,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                                 } catch (_: Exception) { report("无法删除便签。") }
                             }
                         },
-                        onChild = { id -> noteId = id; messageId = null; selection = null },
-                        draft = drafts[focusedId] ?: focused.optString("draft"),
-                        onDraft = { editDraft(focused, it) },
+                        onChild = { id -> noteId = id; messageId = null; selection = null; activeBranch = null },
                         onTitle = { value -> editNote(focusedId) { it.put("title", value) } },
-                        onTemplate = { template -> editNote(focusedId) { note ->
-                            note.put("templateId", template.getString("id")).put("task", template.getString("task"))
-                        } },
-                        onAttach = { attachToDraft(focusedId, it) },
-                        onRemoveImage = { id -> editNote(focusedId) { note ->
-                            note.put("draftAssetIds", JSONArray(note.optJSONArray("draftAssetIds").strings().filterNot { it == id }))
-                        } },
-                        report = report,
                     )
                 }
             } else {
@@ -699,7 +640,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     val root = note.getJSONObject("anchor")
                     root.anchorParts().map { PageNote(index + 1, note, it) }
                 }.groupBy { it.anchor.getInt("page") }
-                val handles = selection?.range?.takeIf { it.quote.isNotBlank() && selection?.parent == null }?.handles().orEmpty()
+                val handles = selection?.range?.takeIf { it.quote.isNotBlank() }?.handles().orEmpty()
                 val pager = Modifier.fillMaxWidth().weight(1f).clipToBounds()
                     .onGloballyPositioned { viewportCoordinates = it }.onSizeChanged { viewportSize = it }.pdfTextSelection(
                     pdf, scroll, horizontal, !region, pageLayouts, pages,
@@ -746,7 +687,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             }
         }
         selection?.let { selected ->
-            key(selected) {
+            key(selected.submission.noteId) {
                 val roomWidth = constraints.maxWidth
                 val roomHeight = constraints.maxHeight
                 val margin = with(density) { 14.dp.roundToPx() }
@@ -761,14 +702,18 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     val y = if (down <= maxY) down else anchor.y.roundToInt() - (popupSize.height + margin)
                     IntOffset((anchor.x.roundToInt() + margin).coerceIn(margin, maxX), y.coerceIn(margin, maxY))
                 }
-                SelectionPanel(selected.branchQuote.ifBlank { selected.range.quote }, selected.range.quote.isBlank() && selected.parent == null,
-                    selected.parent == null, profile != null, selected.submission.noteId in requests,
+                val savedImages = selected.draft?.optJSONArray("draftAssetIds").strings()
+                val previews = project.optJSONArray("assets").objects().filter { it.optString("id") in savedImages }.map {
+                    AttachmentPreview(it.getString("id"), it.getString("name"), file = workspace.assetFile(doc.item.id, it))
+                }
+                SelectionPanel(selected.quote, selected.range?.quote?.isBlank() == true,
+                    selected.range != null, profile != null, selected.submission.noteId in requests,
                     modifier = overlay.onSizeChanged { popupSize = it }, maxHeight = maxHeight * .72f, bottom = bottom,
-                    templates = model.templates(project),
+                    templates = model.templates(project), draft = selected.draft, savedImages = previews,
                     dismiss = { selection = null },
-                    submit = { question, task, screenshot, images, template, save ->
+                    submit = { question, task, screenshot, images, template, save, retained ->
                         request(selected, question, task, screenshot, externalImages = images,
-                            templateId = template?.getString("id"), saveOnly = save)
+                            templateId = template?.getString("id"), saveOnly = save, retainedImages = retained)
                     },
                     settings = openSettings, report = report)
             }
@@ -819,20 +764,24 @@ private data class RequestDraft(val project: JSONObject, val prompt: String, val
 
 @Composable
 private fun SelectionPanel(quote: String, imageOnly: Boolean, cropAvailable: Boolean, configured: Boolean, busy: Boolean,
-                           modifier: Modifier, maxHeight: Dp, bottom: Boolean, templates: List<JSONObject>, dismiss: () -> Unit,
-                           submit: (String, String, Boolean, List<Uri>, JSONObject?, Boolean) -> Unit,
+                           modifier: Modifier, maxHeight: Dp, bottom: Boolean, templates: List<JSONObject>,
+                           draft: JSONObject?, savedImages: List<AttachmentPreview>, dismiss: () -> Unit,
+                           submit: (String, String, Boolean, List<Uri>, JSONObject?, Boolean, List<String>) -> Unit,
                            settings: () -> Unit, report: (String) -> Unit) {
-    var question by remember { mutableStateOf("") }
+    var question by remember { mutableStateOf(draft?.optString("draft").orEmpty()) }
     var capture by remember { mutableStateOf(imageOnly) }
     var images by remember { mutableStateOf(emptyList<Uri>()) }
-    var template by remember { mutableStateOf<JSONObject?>(null) }
+    var retained by remember { mutableStateOf(savedImages) }
+    var template by remember { mutableStateOf(templates.firstOrNull { it.optString("id") == draft?.optString("templateId") }) }
     fun attach(uris: List<Uri>) {
         val incoming = (images + uris).distinct()
-        if (incoming.size > 4) report("每次最多附 4 张图片。") else images = incoming
+        if (incoming.size + retained.size > 4) report("每次最多附 4 张图片。") else images = incoming
     }
     fun send(task: String, save: Boolean = false) {
         if (busy) return
-        if (configured || save) submit(question, template?.getString("task") ?: task, capture, images, template, save) else settings()
+        if (configured || save) {
+            submit(question, template?.getString("task") ?: task, capture, images, template, save, retained.map { it.id })
+        } else settings()
     }
     var tasksOpen by remember { mutableStateOf(false) }
     Surface(modifier = modifier.widthIn(max = if (bottom) 560.dp else 410.dp).fillMaxWidth(),
@@ -854,9 +803,12 @@ private fun SelectionPanel(quote: String, imageOnly: Boolean, cropAvailable: Boo
                     Checkbox(capture, { capture = it }, enabled = !imageOnly)
                     Text("附选区截图", color = Muted, fontSize = 13.sp)
                 }
-                AttachmentPreviews(images.map { uri ->
+                AttachmentPreviews(retained + images.map { uri ->
                     AttachmentPreview(uri.toString(), uri.lastPathSegment?.substringAfterLast('/') ?: "图片", uri = uri)
-                }) { id -> images = images.filterNot { it.toString() == id } }
+                }) { id ->
+                    retained = retained.filterNot { it.id == id }
+                    images = images.filterNot { it.toString() == id }
+                }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     AttachmentControls(::attach, report)
                     TemplateMenu(templates, template?.getString("id"), automatic = true) { template = it }

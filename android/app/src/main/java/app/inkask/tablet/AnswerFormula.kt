@@ -54,6 +54,8 @@ internal fun MarkwonVisitor.printFormula(
         val fit = (maxWidth.toFloat() / drawable.intrinsicWidth.coerceAtLeast(1)).coerceAtMost(1f)
         setSpans(start, FormulaSpan(drawable, fit, if (block) maxWidth else 0, if (block) textSize * .22f else 0f))
     }
+    val delimiter = if (block) "\$\$" else "\$"
+    setSpans(start, AnswerMarkup(delimiter + latex.trim('\r', '\n') + delimiter))
     setSpans(start, object : ClickableSpan() {
         override fun onClick(widget: View) { onOpen(latex) }
         override fun updateDrawState(ds: TextPaint) { ds.isUnderlineText = false }

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { runInNewContext } from "node:vm";
 import { expect, it } from "vitest";
 import { buildContext } from "../src/core/context";
+import { createBranch } from "../src/core/branches";
 import { planNoteExport } from "../src/core/note-export";
 import { DEFAULT_TEMPLATES } from "../src/core/templates";
 import type { Note, Project } from "../src/types";
@@ -31,6 +32,25 @@ it("runs the Android asset bundle on JSON metadata without browser APIs", async 
     };
     const context = { project, note, question: note.draft, template };
     expect(JSON.parse(core.context(JSON.stringify(context)))).toEqual(buildContext(context));
+    note.inheritedHistory = [{ role: "assistant", content: "祖先回答" }];
+    note.messages = [
+      { id: "q1", role: "user", content: "原问题", assetIds: ["image"], status: "complete", createdAt: 2 },
+      { id: "a1", role: "assistant", content: "目标回答", assetIds: [], status: "complete", createdAt: 3 },
+      { id: "q2", role: "user", content: "后来问的", assetIds: [], status: "complete", createdAt: 4 },
+      { id: "a2", role: "assistant", content: "不应继承", assetIds: [], status: "complete", createdAt: 5 },
+    ];
+    const anchor = { start: 0, end: 4, quote: "目标回答" };
+    const args = { project, parentId: note.id, messageId: "a1", anchor, template, id: "native-branch", createdAt: 6 };
+    const child = JSON.parse(core.branch(JSON.stringify(args))) as Note;
+    expect(child).toEqual({ ...createBranch(project, note, "a1", anchor.quote, template.task, anchor), id: args.id, createdAt: 6 });
+    expect(child.inheritedHistory).toEqual([
+      { role: "assistant", content: "祖先回答" },
+      { role: "user", content: "原问题", assetIds: ["image"] },
+      { role: "assistant", content: "目标回答" },
+    ]);
+    expect(JSON.parse(core.branch(JSON.stringify({ ...args, id: "sibling" }))).id).toBe("sibling");
+    note.messages = [];
+    note.inheritedHistory = [];
     const raw = "实际引用 [S1] [S1]，代码 `$[S2]$`，公式 $[S2]$。\n\n$$\n\\frac{a}{b}\n$$";
     const sources = [{ id: "S1", page: 1, text: "一致有界" }, { id: "S2", page: 1, text: "代码" }];
     const citations = JSON.parse(core.citations(JSON.stringify({ raw, sources })));

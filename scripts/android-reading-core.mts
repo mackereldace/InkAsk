@@ -1,4 +1,5 @@
 import { exportMarkdown } from "../src/core/archive.js";
+import { createBranch } from "../src/core/branches.js";
 import { prepareCitationMarkdown } from "../src/core/citation-markdown.js";
 import { buildContext } from "../src/core/context.js";
 import { canMoveFolder, topLevelMoveItems, type LibraryItemRef } from "../src/core/library.js";
@@ -9,12 +10,26 @@ import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import type { Anchor, PageText, Project, Source } from "../src/types.js";
+import type { Anchor, AnswerAnchor, PageText, Project, PromptTemplate, Source } from "../src/types.js";
 import type { WorkspaceFolder } from "../src/core/storage.js";
 
 // Android supplies saved JSON metadata. Rendering and PDF/image I/O stay native.
 export function context(input: string): string {
   return JSON.stringify(buildContext(JSON.parse(input)));
+}
+
+export function branch(input: string): string {
+  const { project, parentId, messageId, anchor, template, id, createdAt } = JSON.parse(input) as {
+    project: Project; parentId: string; messageId: string; anchor: AnswerAnchor;
+    template: PromptTemplate; id: string; createdAt: number;
+  };
+  const parent = project.notes.find(note => note.id === parentId);
+  if (!parent?.messages.some(message => message.id === messageId &&
+      message.role === "assistant" && message.status !== "streaming")) {
+    throw new Error("所选回答已不存在或仍在生成。");
+  }
+  const note = createBranch({ ...project, templates: [template] }, parent, messageId, anchor.quote, template.task, anchor);
+  return JSON.stringify({ ...note, id, createdAt });
 }
 
 export function citations(input: string): string {

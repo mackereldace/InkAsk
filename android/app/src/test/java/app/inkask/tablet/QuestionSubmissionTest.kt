@@ -40,4 +40,16 @@ class QuestionSubmissionTest {
         assistant.put("status", "complete")
         assertTrue(project.hasCommittedSubmission(submission.noteId, submission, false, AnswerRetry(submission.answerId, 11)))
     }
+
+    @Test
+    fun existingDraftCanBeEditedButTheSameSaveIsCommittedOnce() {
+        val submission = QuestionSubmission(noteId = "draft")
+        val notes = JSONArray().put(JSONObject().put("id", submission.noteId).put("messages", JSONArray()))
+        val project = JSONObject().put("notes", notes)
+        assertFalse(project.hasCommittedSubmission("draft", submission, true, null, draftMessageCount = 0))
+        notes.getJSONObject(0).put("draftSaveToken", submission.userId)
+        assertTrue(project.hasCommittedSubmission("draft", submission, true, null, draftMessageCount = 0))
+        assertFalse(project.hasCommittedSubmission("draft", submission, false, null, draftMessageCount = 0))
+        assertFalse(project.hasCommittedSubmission("draft", QuestionSubmission(noteId = "draft"), true, null, draftMessageCount = 0))
+    }
 }

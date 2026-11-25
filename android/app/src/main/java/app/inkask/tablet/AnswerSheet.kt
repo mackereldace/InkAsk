@@ -2,11 +2,12 @@ package app.inkask.tablet
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
 import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
-import android.net.Uri
+import android.text.Selection
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -15,9 +16,6 @@ import android.text.method.ArrowKeyMovementMethod
 import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ImageSpan
-import android.view.ActionMode
-import android.view.Menu
-import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -54,6 +52,7 @@ import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import org.commonmark.node.Code
 import org.commonmark.node.Image as MarkdownImage
@@ -62,8 +61,6 @@ import org.commonmark.node.Node
 import org.commonmark.node.Paragraph
 import org.commonmark.node.Text as MarkdownText
 import org.json.JSONObject
-
-internal data class AnswerQuote(val start: Int, val quote: String, val location: Offset? = null)
 
 private class AnswerZoom {
     var offset = -1
@@ -94,13 +91,12 @@ private class AnswerZoom {
 @Composable
 internal fun AnswerSheet(
     note: JSONObject, selectedMessage: String?, reply: String?, scale: Float, busy: Boolean, scroll: ScrollState,
-    core: SharedReadingCore, attachments: Map<String, AttachmentPreview>, children: List<JSONObject>, templates: List<JSONObject>,
-    onZoom: (Float) -> Unit,
+    savedScroll: Int?,
+    core: SharedReadingCore, attachments: Map<String, AttachmentPreview>, children: List<JSONObject>,
+    activeBranch: String?, pendingQuote: AnswerQuote?, onZoom: (Float) -> Unit,
     onSource: (JSONObject, String) -> Unit, onStop: () -> Unit, onMessage: (String) -> Unit,
     onBranch: (String, AnswerQuote) -> Unit, onChild: (String) -> Unit, onDelete: () -> Unit,
-    draft: String, onDraft: (String) -> Unit, onTitle: (String) -> Unit, onTemplate: (JSONObject) -> Unit,
-    onAttach: (List<Uri>) -> Unit, onRemoveImage: (String) -> Unit,
-    onRequest: (String, Boolean) -> Unit, report: (String) -> Unit,
+    onResumeDraft: () -> Unit, onRetry: (String) -> Unit, onTitle: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val anchor = note.getJSONObject("anchor")
@@ -113,7 +109,6 @@ internal fun AnswerSheet(
     val answer = answers.firstOrNull { it.optString("id") == selectedMessage } ?: answers.lastOrNull()
     val answerId = answer?.optString("id")
     val question = if (answer == null) null else messages.takeWhile { it !== answer }.lastOrNull { it.optString("role") == "user" }
-    val draftImages = note.optJSONArray("draftAssetIds").strings().mapNotNull(attachments::get)
     var choosingAnswer by remember { mutableStateOf(false) }
     var sourceExpanded by remember { mutableStateOf(answer == null) }
     var detailsExpanded by remember { mutableStateOf(false) }
@@ -121,6 +116,16 @@ internal fun AnswerSheet(
     var reader by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var textView by remember(answerId) { mutableStateOf<TextView?>(null) }
     var openFormula by remember { mutableStateOf<String?>(null) }
+    var pendingScroll by remember(scroll) { mutableStateOf(savedScroll?.takeIf { it > 0 }) }
+    var restoreTarget by remember(scroll) { mutableStateOf<Int?>(null) }
+    var bottomSpace by remember(scroll) { mutableIntStateOf(0) }
+    val density = LocalDensity.current
+    LaunchedEffect(restoreTarget) {
+        val target = restoreTarget ?: return@LaunchedEffect
+        if (bottomSpace > 0) snapshotFlow { scroll.maxValue }.first { it >= target }
+        if (!scroll.isScrollInProgress) scroll.scrollTo(target)
+        restoreTarget = null
+    }
     val zoom = remember(answerId) { AnswerZoom() }
     val changeScale by rememberUpdatedState(onZoom)
     val activity = remember(context) {
@@ -195,27 +200,47 @@ internal fun AnswerSheet(
                 }
                 if (answer != null && answerId != null) key(answerId) {
                     val displayed = if (answer === answers.lastOrNull()) reply ?: answer.optString("content") else answer.optString("content")
-                    val canBranch = displayed.isNotBlank() && (answer.optString("status") != "streaming" || !busy)
+                    val canBranch = displayed.isNotBlank() && answer.optString("status") != "streaming"
                     val sources = answer.optJSONArray("sources").objects()
                     val branches = children.filter {
                         it.optString("parentMessageId").ifBlank { answers.last().getString("id") } == answerId
                     }
                     val prepared by produceState<JSONObject?>(null, displayed, sources) {
                         if (busy) delay(80)
-                        value = withContext(Dispatchers.Default) { runCatching { core.citations(displayed, sources) }.getOrNull() }
+                        value = withContext(Dispatchers.Default) {
+                            runCatching { core.citations(displayed, sources) }
+                                .getOrElse { JSONObject().put("nativeContent", displayed) }
+                        }
                     }
-                    var renderedText by remember { mutableStateOf("") }
+                    var renderedText by remember { mutableStateOf<AnswerText?>(null) }
                     var promptExpanded by remember { mutableStateOf(false) }
                     var evidenceExpanded by remember { mutableStateOf(false) }
                     var materialsExpanded by remember { mutableStateOf(false) }
                     if (displayed.isNotBlank()) {
                         NativeMarkdown(prepared?.optString("nativeContent") ?: displayed, scale, sources, branches, attachments,
-                            canBranch, onSource, { quote -> onBranch(answerId, quote) }, onChild, { renderedText = it },
-                            onView = { textView = it }, onFormula = { openFormula = it })
+                            canBranch, pendingQuote, activeBranch, onSource,
+                            { quote -> onBranch(answerId, quote) }, onChild, { renderedText = it },
+                            onView = { textView = it }, onFormula = { openFormula = it },
+                            onLayoutReady = if (prepared == null) null else {
+                                {
+                                    pendingScroll?.let { saved ->
+                                        val limit = with(density) { 48.dp.roundToPx() }
+                                        // Keep the last lines in place when the rebuilt text view measures slightly shorter.
+                                        bottomSpace = (saved - scroll.maxValue).coerceIn(0, limit)
+                                        restoreTarget = if (bottomSpace == 0) saved else minOf(saved, scroll.maxValue + bottomSpace)
+                                    }
+                                    pendingScroll = null
+                                }
+                            })
                     }
-                    val unplaced = branches.filter { child -> answerRange(renderedText, child) == null }
-                    unplaced.forEach { child ->
-                        Control("› " + child.optString("title"), "打开追问分支") { onChild(child.getString("id")) }
+                    renderedText?.let { text ->
+                        branches.forEachIndexed { index, child ->
+                            val id = child.getString("id")
+                            if (text.range(child) == null) {
+                                Control("${index + 1}. ${child.optString("title")}", "打开追问 ${index + 1}",
+                                    active = id == activeBranch) { onChild(id) }
+                            }
+                        }
                     }
                     if (answer.optString("status") == "error") Text(answer.optString("error", "回答未完成。"), color = Muted)
                     if (answer.optString("status") == "stopped" || (!busy && answer.optString("status") == "streaming")) {
@@ -226,9 +251,8 @@ internal fun AnswerSheet(
                             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                             Control("停止生成", action = onStop)
                         } else if (displayed.isNotBlank()) {
-                            Control("对整篇回答提问", enabled = renderedText.isNotBlank() && canBranch) {
-                                val text = renderedText.trim()
-                                onBranch(answerId, AnswerQuote(renderedText.indexOf(text), text))
+                            Control("对整篇回答提问", enabled = renderedText?.whole() != null && canBranch) {
+                                renderedText?.whole()?.let { onBranch(answerId, it) }
                             }
                             Control("复制回答") {
                                 context.getSystemService(ClipboardManager::class.java)
@@ -237,7 +261,7 @@ internal fun AnswerSheet(
                         }
                         if (!busy && answer === answers.lastOrNull() && question != null &&
                             answer.optString("status") in setOf("error", "stopped", "streaming")) {
-                            Control("重试") { onRequest(question.optString("content"), true) }
+                            Control("重试") { onRetry(question.optString("content")) }
                         }
                         if (answer.optString("prompt").isNotBlank()) Control("提问记录") { promptExpanded = !promptExpanded }
                     }
@@ -255,24 +279,16 @@ internal fun AnswerSheet(
                         }
                     }
                 }
-                if (!busy) {
+                val savedDraft = note.optString("draft")
+                val hasDraft = savedDraft.isNotBlank() || (note.optJSONArray("draftAssetIds")?.length() ?: 0) > 0
+                if (!busy && (answer == null || hasDraft)) {
                     HorizontalDivider(color = Line)
-                    val readyToSend = answer == null || draft.isNotBlank() || draftImages.isNotEmpty()
-                    OutlinedTextField(draft, { onDraft(it.take(4_000)) }, modifier = Modifier.fillMaxWidth().pasteImages(onAttach)
-                        .questionShortcut { if (readyToSend) onRequest(draft, false) },
-                        placeholder = { Text("在这个便签中继续提问") }, minLines = 2)
-                    AttachmentPreviews(draftImages, onRemoveImage)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        AttachmentControls(onAttach, report)
-                        TemplateMenu(templates, note.optString("templateId")) { if (it != null) onTemplate(it) }
-                        Spacer(Modifier.weight(1f))
-                        Button(onClick = { onRequest(draft, false) },
-                            enabled = readyToSend,
-                            shape = ControlShape) { Text(if (answer == null) "发送提问" else "继续提问") }
-                    }
+                    Text(savedDraft.ifBlank { if (hasDraft) "已保存图片草稿" else "这条便签还没有发送问题。" }, color = Muted)
+                    Control("继续草稿", action = onResumeDraft)
                 }
             }
         }
+        if (bottomSpace > 0) Spacer(Modifier.height(with(density) { bottomSpace.toDp() }))
     }
     if (confirmDeletion) AlertDialog(onDismissRequest = { confirmDeletion = false }, title = { Text("删除便签？") },
         text = { Text("所选便签及其关联的追问分支将一起删除。") },
@@ -307,9 +323,10 @@ private fun CitationControl(source: JSONObject, action: (JSONObject, String) -> 
 @Composable
 private fun NativeMarkdown(
     raw: String, scale: Float, sources: List<JSONObject>, children: List<JSONObject>, attachments: Map<String, AttachmentPreview>,
-    canBranch: Boolean,
-    onSource: (JSONObject, String) -> Unit, onBranch: (AnswerQuote) -> Unit, onChild: (String) -> Unit, onText: (String) -> Unit,
-    onView: (TextView) -> Unit, onFormula: (String) -> Unit,
+    canBranch: Boolean, pendingQuote: AnswerQuote?, activeBranch: String?,
+    onSource: (JSONObject, String) -> Unit, onBranch: (AnswerQuote) -> Unit,
+    onChild: (String) -> Unit, onText: (AnswerText) -> Unit,
+    onView: (TextView) -> Unit, onFormula: (String) -> Unit, onLayoutReady: (() -> Unit)?,
 ) {
     val handler by rememberUpdatedState(onSource)
     val branch by rememberUpdatedState(onBranch)
@@ -317,60 +334,37 @@ private fun NativeMarkdown(
     val lookup by rememberUpdatedState(sources.associateBy { it.getString("id") })
     val branchEnabled by rememberUpdatedState(canBranch)
     val formulaViewer by rememberUpdatedState(onFormula)
+    val layoutReady by rememberUpdatedState(onLayoutReady)
     val rendered = raw
     val context = LocalContext.current
     val ids = remember(raw) { assetReferences.findAll(raw).map { it.groupValues[1] }.distinct().take(20).toList() }
-    val images by produceState<Map<String, Bitmap>>(emptyMap(), ids, attachments) {
+    val loadedImages by produceState<Map<String, Bitmap>?>(null, ids, attachments) {
         val maxDimension = 260f * context.resources.displayMetrics.density
         value = withContext(Dispatchers.IO) {
             ids.mapNotNull { id -> attachments[id]?.decode(context, maxDimension)?.let { id to it } }.toMap()
         }
     }
+    val images = loadedImages.orEmpty()
+    val ready = onLayoutReady != null && (ids.isEmpty() || loadedImages != null)
     var marks by remember { mutableStateOf<List<AnswerMark>>(emptyList()) }
     val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
     val gutter = if (children.isEmpty()) 0.dp else 44.dp
     val textWidth = with(density) { (maxWidth - gutter).roundToPx().coerceAtLeast(1) }
     AndroidView(modifier = Modifier.fillMaxWidth().padding(end = gutter), factory = { context ->
-        TextView(context).apply {
+        SelectableAnswerView(context).apply {
             setTextColor(Ink.toArgb())
             setLinkTextColor(Green.toArgb())
             setTextIsSelectable(true)
             movementMethod = CitationMovement()
             typeface = Typeface.create("sans-serif", Typeface.NORMAL)
             setLineSpacing(4f * resources.displayMetrics.density, 1.13f)
-            customSelectionActionModeCallback = object : ActionMode.Callback {
-                override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
-                    if (branchEnabled) menu.add(0, 1001, 0, "追问").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-                    return true
-                }
-                override fun onPrepareActionMode(mode: ActionMode, menu: Menu) = false
-                override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean {
-                    if (item.itemId != 1001) return false
-                    val start = minOf(selectionStart, selectionEnd)
-                    val end = maxOf(selectionStart, selectionEnd)
-                    if (start >= 0 && end > start) {
-                        val selected = text.subSequence(start, end).toString()
-                        val quote = selected.trim()
-                        if (quote.isNotEmpty() && branchEnabled) {
-                            val at = IntArray(2).also(::getLocationInWindow)
-                            val line = layout?.getLineForOffset(end - 1)
-                            val x = layout?.getPrimaryHorizontal(end - 1) ?: 0f
-                            val y = line?.let { layout.getLineBottom(it) } ?: 0
-                            branch(AnswerQuote(start + selected.indexOf(quote), quote,
-                                Offset(at[0] + x, at[1] + y + totalPaddingTop.toFloat())))
-                        }
-                    }
-                    mode.finish()
-                    return true
-                }
-                override fun onDestroyActionMode(mode: ActionMode) = Unit
-            }
+            onQuote = { quote -> if (branchEnabled) branch(quote) }
             onView(this)
         }
     }, update = { view ->
         val size = 16 * scale
-        val key = listOf(rendered, size, children.map { it.toString() }, images, textWidth)
+        val key = listOf(rendered, size, children.map { it.toString() }, images, textWidth, ready)
         if (view.tag != key) {
             view.tag = key
             view.textSize = size
@@ -425,9 +419,13 @@ private fun NativeMarkdown(
                 }
             }
             val native = SpannableStringBuilder(markdown.render(document))
-            val text = native.toString()
+            val parts = native.getSpans(0, native.length, AnswerMarkup::class.java).map {
+                AnswerTextPart(native.getSpanStart(it), native.getSpanEnd(it), it)
+            }
+            val text = AnswerText(native.toString(), parts)
+            view.answerText = text
             val ranges = children.mapIndexedNotNull { index, child ->
-                val range = answerRange(text, child) ?: return@mapIndexedNotNull null
+                val range = text.range(child) ?: return@mapIndexedNotNull null
                 Triple(index + 1, child, range)
             }
             for ((_, child, range) in ranges) {
@@ -449,8 +447,11 @@ private fun NativeMarkdown(
                     val y = layout.getLineTop(layout.getLineForOffset(range.first)) + view.totalPaddingTop
                     AnswerMark(number, child, y)
                 }
+                // The provisional Markdown layout can clamp the initial scroll before rich text is ready.
+                if (ready) layoutReady?.invoke()
             }
         }
+        view.showQuote(pendingQuote, children.firstOrNull { it.optString("id") == activeBranch })
     })
     val separation = with(density) { 42.dp.roundToPx() }
     val groups = mutableListOf<MutableList<AnswerMark>>()
@@ -483,15 +484,53 @@ private fun NativeMarkdown(
 }
 
 private data class AnswerMark(val number: Int, val child: JSONObject, val top: Int)
-private fun answerRange(text: String, child: JSONObject): IntRange? {
-    val anchor = child.optJSONObject("answerAnchor")
-    val quote = anchor?.optString("quote")?.takeIf { it.isNotBlank() } ?: child.optString("branchQuote").trim()
-    if (quote.isEmpty()) return null
-    val start = anchor?.optInt("start", -1) ?: -1
-    val end = anchor?.optInt("end", -1) ?: -1
-    if (start >= 0 && end >= start && end <= text.length && text.substring(start, end) == quote) return start until end
-    val found = text.indexOf(quote)
-    return if (found >= 0 && text.indexOf(quote, found + 1) < 0) found until found + quote.length else null
+private class SelectableAnswerView(context: Context) : TextView(context) {
+    var answerText: AnswerText? = null
+    var onQuote: ((AnswerQuote) -> Unit)? = null
+    private var pending: AnswerQuote? = null
+    private val pendingHighlight = BackgroundColorSpan(0x668FC451)
+    private val branchHighlight = BackgroundColorSpan(0x5597BF46)
+    private val publish = Runnable {
+        val start = minOf(selectionStart, selectionEnd)
+        val end = maxOf(selectionStart, selectionEnd)
+        if (!isAttachedToWindow || start < 0 || end <= start) return@Runnable
+        val origin = IntArray(2).also(::getLocationInWindow)
+        val geometry = layout ?: return@Runnable
+        val line = geometry.getLineForOffset(end - 1)
+        val x = geometry.getPrimaryHorizontal(end)
+        val y = geometry.getLineBottom(line)
+        val point = Offset(origin[0] + totalPaddingLeft + x, origin[1] + totalPaddingTop + y.toFloat())
+        answerText?.selection(start, end, point)?.let { onQuote?.invoke(it) }
+    }
+
+    override fun onSelectionChanged(selStart: Int, selEnd: Int) {
+        super.onSelectionChanged(selStart, selEnd)
+        if (onQuote == null) return
+        removeCallbacks(publish)
+        if (selStart >= 0 && selEnd >= 0 && selStart != selEnd) postDelayed(publish, 100)
+    }
+
+    fun showQuote(quote: AnswerQuote?, active: JSONObject?) {
+        val body = text as? Spannable ?: return
+        if (quote == null && pending != null) {
+            removeCallbacks(publish)
+            Selection.removeSelection(body)
+        }
+        pending = quote
+        body.removeSpan(pendingHighlight)
+        body.removeSpan(branchHighlight)
+        fun highlight(target: JSONObject?, span: BackgroundColorSpan) {
+            val range = target?.let { answerText?.range(it) } ?: return
+            body.setSpan(span, range.first, range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        highlight(active, branchHighlight)
+        highlight(quote?.let { JSONObject().put("answerAnchor", it.anchor()) }, pendingHighlight)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(publish)
+        super.onDetachedFromWindow()
+    }
 }
 
 private fun Node.visit(action: (Node) -> Unit) {
