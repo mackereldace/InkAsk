@@ -20,7 +20,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -40,8 +39,8 @@ private val IslandHandleSize = 54.dp
 private val IslandFlingMinSpeed = 360.dp
 private val IslandFlingMaxSpeed = 5200.dp
 private val IslandFlingBounceSpeed = 1000.dp
+private val IslandFlingEasterEggSpeed = 2300.dp
 private val IslandFlingStopSpeed = 38.dp
-private const val IslandFlingPauseMillis = 48L
 
 internal enum class ReaderIslandEdge {
     Free, Top, Bottom, Left, Right;
@@ -160,7 +159,7 @@ internal fun ReaderIsland(
                     fun release(target: ReaderIslandPosition, size: IntSize, handle: LayoutCoordinates, velocity: Offset) {
                         val launch = readerIslandLaunch(
                             velocity, target.edge, IslandFlingMinSpeed.toPx(),
-                            IslandFlingMaxSpeed.toPx(), IslandFlingBounceSpeed.toPx(),
+                            IslandFlingMaxSpeed.toPx(), IslandFlingBounceSpeed.toPx(), IslandFlingEasterEggSpeed.toPx(),
                         )
                         val wasVertical = previousVertical
                         if (launch == null) {
@@ -177,14 +176,17 @@ internal fun ReaderIsland(
                             var lastFrame = started
                             while (motion.velocity.getDistance() >= IslandFlingStopSpeed.toPx()) {
                                 val frame = withFrameNanos { it }
-                                if (frame - started > 820_000_000L || !handle.isAttached || viewport?.size != size) break
+                                val elapsed = (frame - started) / 1_000_000_000f
+                                if (elapsed > launch.mode.maxSeconds || !handle.isAttached || viewport?.size != size) break
                                 val duration = ((frame - lastFrame) / 1_000_000_000f).coerceIn(0f, .036f)
                                 lastFrame = frame
                                 val handleSize = IslandHandleSize.roundToPx()
                                 val collisionSize = if (launch.edge == ReaderIslandEdge.Free) {
                                     IntSize(handleSize, handleSize)
                                 } else handle.size
-                                motion = motion.advance(duration, size, collisionSize, IslandMargin.toPx())
+                                motion = motion.advance(
+                                    duration, size, collisionSize, IslandMargin.toPx(), launch.mode, elapsed,
+                                )
                                 current = initial.copy(
                                     x = motion.center.x / size.width.coerceAtLeast(1),
                                     y = motion.center.y / size.height.coerceAtLeast(1),
@@ -208,9 +210,8 @@ internal fun ReaderIsland(
                             down.consume()
                         }
 
-                        var lastMotionTime = down.uptimeMillis
-                        var lastPoint = root.windowToLocal(handle.localToWindow(down.position))
-                        val velocityTracker = VelocityTracker().apply { addPosition(lastMotionTime, lastPoint) }
+                        fun pointerPosition(local: Offset) = root.windowToLocal(handle.localToWindow(local))
+                        val velocity = ReaderIslandVelocity(down.uptimeMillis, pointerPosition(down.position))
                         try {
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -219,9 +220,11 @@ internal fun ReaderIsland(
                                 if (event.changes.any { it.id != down.id && it.pressed }) return@awaitEachGesture
                                 val released = change.changedToUpIgnoreConsumed()
                                 if (released && change.isConsumed) return@awaitEachGesture
+                                if (!root.isAttached || !handle.isAttached) return@awaitEachGesture
+                                val at = pointerPosition(change.position)
+                                change.historical.forEach { velocity.sample(it.uptimeMillis, pointerPosition(it.position)) }
+                                if (!released) velocity.sample(change.uptimeMillis, at)
                                 if (dragging != null || (!released && (change.position - down.position).getDistance() > viewConfiguration.touchSlop)) {
-                                    if (!root.isAttached || !handle.isAttached) return@awaitEachGesture
-                                    val at = root.windowToLocal(handle.localToWindow(change.position))
                                     val size = root.size
                                     val target = ReaderIslandPosition.fromDrag(
                                         at, size, snapDistance, dragging?.edge ?: ReaderIslandEdge.Free, hysteresis,
@@ -229,17 +232,7 @@ internal fun ReaderIsland(
                                     dragging = target
                                     change.consume()
 
-                                    if (released) {
-                                        val velocity = if (change.uptimeMillis - lastMotionTime <= IslandFlingPauseMillis) {
-                                            val measured = velocityTracker.calculateVelocity()
-                                            Offset(measured.x, measured.y)
-                                        } else Offset.Zero
-                                        release(target, size, handle, velocity)
-                                    } else if (at != lastPoint) {
-                                        velocityTracker.addPosition(change.uptimeMillis, at)
-                                        lastMotionTime = change.uptimeMillis
-                                        lastPoint = at
-                                    }
+                                    if (released) release(target, size, handle, velocity.release(change.uptimeMillis, at))
                                 }
                                 if (released || !change.pressed) return@awaitEachGesture
                             }
