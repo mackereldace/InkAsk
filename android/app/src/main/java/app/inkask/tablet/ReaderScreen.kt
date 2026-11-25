@@ -684,7 +684,9 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     canPanAcross = { crossPanLimit() > 0f || across != 0f },
                     onPanAcross = { delta ->
                         val limit = crossPanLimit()
+                        val previous = across
                         across = (across + delta).coerceIn(minOf(-limit, across), maxOf(limit, across))
+                        across - previous
                     },
                     onDoubleTap = { position ->
                         beginZoom(position)

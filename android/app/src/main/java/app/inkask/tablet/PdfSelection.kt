@@ -2,9 +2,15 @@ package app.inkask.tablet
 
 import android.graphics.Matrix
 import android.graphics.Point
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.VectorConverter
+import androidx.compose.animation.core.animateDecay
+import androidx.compose.animation.rememberSplineBasedDecay
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -19,12 +25,17 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -101,7 +112,7 @@ internal fun Modifier.pdfTextSelection(
     layouts: Map<Int, PdfPageLayout>, pages: Map<Int, JSONObject>,
     handles: List<PdfHandle>,
     onZoomStart: (Offset) -> Unit, onZoom: (Float, Offset) -> Unit,
-    canPanAcross: () -> Boolean, onPanAcross: (Float) -> Unit, onDoubleTap: (Offset) -> Unit,
+    canPanAcross: () -> Boolean, onPanAcross: (Float) -> Float, onDoubleTap: (Offset) -> Unit,
     onPreview: (PdfSelection?) -> Unit, onSelect: (PdfSelection, Offset) -> Unit, report: (String) -> Unit,
 ): Modifier {
     val viewport = remember(scroll) { PdfViewport() }
@@ -117,8 +128,10 @@ internal fun Modifier.pdfTextSelection(
     val doubleTap by rememberUpdatedState(onDoubleTap)
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
+    val decay = rememberSplineBasedDecay<Offset>()
+    val mainDirection = if (horizontal && LocalLayoutDirection.current == LayoutDirection.Rtl) 1f else -1f
     return onGloballyPositioned { viewport.coordinates = it }
-        .pointerInput(pdf, scroll, horizontal, enabled) {
+        .pointerInput(pdf, scroll, horizontal, enabled, mainDirection, decay) {
             fun endpoint(position: Offset, insidePage: Boolean = false): PdfEndpoint? {
                 val view = viewport.coordinates?.takeIf { it.isAttached } ?: return null
                 val window = view.localToWindow(position)
@@ -146,6 +159,7 @@ internal fun Modifier.pdfTextSelection(
             }
 
             var resolving: Job? = null
+            var fling: Job? = null
             var lastTapTime = 0L
             var lastTap = Offset.Unspecified
             val edge = 52.dp.toPx()
@@ -171,13 +185,31 @@ internal fun Modifier.pdfTextSelection(
             fun transform(factor: Float, point: Offset) {
                 window(point)?.let { zoomBy(factor, it) }
             }
+            fun pan(delta: Offset, scrollAlong: (Float) -> Float): Boolean {
+                val main = if (horizontal) delta.x else delta.y
+                val cross = if (horizontal) delta.y else delta.x
+                val scrolled = scrollAlong(main * mainDirection)
+                val panned = panAcross(cross)
+                return scrolled != 0f || panned != 0f
+            }
+            fun flingPan(velocity: Offset): Job = scope.launch {
+                scroll.scroll {
+                    var previous = Offset.Zero
+                    AnimationState(Offset.VectorConverter, Offset.Zero, velocity).animateDecay(decay) {
+                        val delta = value - previous
+                        if (delta != Offset.Zero && !pan(delta, ::scrollBy)) cancelAnimation()
+                        previous = value
+                    }
+                }
+            }
             try {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    fling?.cancel()
                     val fixed = if (enabled) handleStart(down.position) else null
                     val touched = if (enabled) endpoint(down.position, insidePage = true) else null
                     var event: PointerEvent = currentEvent
-                    var crossPan = false
+                    var dragStart: Offset? = null
                     if (fixed == null) {
                         val didEnd = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                             while (true) {
@@ -185,8 +217,11 @@ internal fun Modifier.pdfTextSelection(
                                 val change = event.changes.firstOrNull { it.id == down.id }
                                 if (event.pointerCount() != 1 || change == null) break
                                 val delta = change.position - down.position
-                                if (delta.getDistance() > viewConfiguration.touchSlop) {
-                                    crossPan = enabled && canPan() && if (horizontal) abs(delta.y) > abs(delta.x) else abs(delta.x) > abs(delta.y)
+                                val distance = delta.getDistance()
+                                if (distance > viewConfiguration.touchSlop) {
+                                    if (enabled && canPan()) {
+                                        dragStart = down.position + delta * (viewConfiguration.touchSlop / distance)
+                                    }
                                     break
                                 }
                             }
@@ -209,17 +244,36 @@ internal fun Modifier.pdfTextSelection(
                                 return@awaitEachGesture
                             }
                             lastTapTime = 0L
+                            var lastPosition = dragStart ?: down.position
+                            val tracker = dragStart?.let {
+                                scope.launch(start = CoroutineStart.UNDISPATCHED) { scroll.stopScroll(MutatePriority.UserInput) }
+                                VelocityTracker().apply { addPosition(down.uptimeMillis, down.position) }
+                            }
                             while (event.pointerCount() > 0) {
                                 if (event.pointerCount() >= 2) {
                                     followReaderPinch(event, ::startZoom, ::transform)
                                     break
                                 }
-                                if (crossPan) event.changes.firstOrNull { it.pressed }?.let { change ->
-                                    val delta = change.position - change.previousPosition
-                                    panAcross(if (horizontal) delta.y else delta.x)
+                                if (tracker != null) event.changes.firstOrNull { it.id == down.id }?.let { change ->
+                                    pan(change.position - lastPosition, scroll::dispatchRawDelta)
+                                    lastPosition = change.position
+                                    tracker.addPosition(change.uptimeMillis, change.position)
                                     change.consume()
                                 }
                                 event = awaitPointerEvent(PointerEventPass.Initial)
+                            }
+                            if (tracker != null && event.pointerCount() == 0) {
+                                val up = event.changes.firstOrNull { it.id == down.id && it.changedToUpIgnoreConsumed() }
+                                if (up != null) {
+                                    tracker.addPosition(up.uptimeMillis, up.position)
+                                    val max = viewConfiguration.maximumFlingVelocity
+                                    val velocity = tracker.calculateVelocity(Velocity(max, max))
+                                    val initialVelocity = Offset(velocity.x, velocity.y)
+                                    up.consume()
+                                    if (initialVelocity.getDistance() >= viewConfiguration.minimumFlingVelocity) {
+                                        fling = flingPan(initialVelocity)
+                                    }
+                                }
                             }
                             return@awaitEachGesture
                         }
@@ -298,6 +352,7 @@ internal fun Modifier.pdfTextSelection(
                     }
                 }
             } finally {
+                fling?.cancel()
                 resolving?.cancel()
             }
         }
