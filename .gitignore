@@ -1,0 +1,12 @@
+.DS_Store
+.idea/
+.gradle/
+.kotlin/
+build/
+node_modules/
+local.properties
+.inkask/
+.env*
+*.apk
+*.jks
+*.keystore
