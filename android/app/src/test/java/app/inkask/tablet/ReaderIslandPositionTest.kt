@@ -101,28 +101,4 @@ class ReaderIslandPositionTest {
         assertFalse(placement.settled(viewport, previousVertical = false, tolerance = 8f).vertical)
     }
 
-    @Test fun aSlowReleaseDoesNotGlide() {
-        val travel = readerIslandFlingTravel(Offset(250f, 160f), ReaderIslandEdge.Free, 420f, 104f)
-
-        assertEquals(Offset.Zero, travel)
-    }
-
-    @Test fun aFastReleaseGlidesInTheSwipeDirectionAndIsCapped() {
-        val travel = readerIslandFlingTravel(Offset(-16_000f, 12_000f), ReaderIslandEdge.Free, 420f, 104f)
-
-        assertEquals(104f, travel.getDistance(), .001f)
-        assertEquals(-83.2f, travel.x, .001f)
-        assertEquals(62.4f, travel.y, .001f)
-    }
-
-    @Test fun aDockedIslandGlidesAlongItsEdge() {
-        val velocity = Offset(1800f, -920f)
-        val left = readerIslandFlingTravel(velocity, ReaderIslandEdge.Left, 420f, 104f)
-        val top = readerIslandFlingTravel(velocity, ReaderIslandEdge.Top, 420f, 104f)
-
-        assertEquals(0f, left.x, .001f)
-        assertEquals(-50f, left.y, .001f)
-        assertEquals(104f, top.x, .001f)
-        assertEquals(0f, top.y, .001f)
-    }
 }

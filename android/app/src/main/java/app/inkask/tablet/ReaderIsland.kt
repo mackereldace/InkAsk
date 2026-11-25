@@ -1,8 +1,6 @@
 package app.inkask.tablet
 
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Easing
-import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -37,11 +35,13 @@ import kotlin.math.roundToInt
 internal val ReaderIslandClearance = 70.dp
 private val IslandSnapDistance = 52.dp
 private val IslandEdgeHysteresis = 8.dp
-private val IslandFlingMinSpeed = 420.dp
-private val IslandFlingMaxTravel = 104.dp
-private const val IslandFlingDurationMillis = 200
+private val IslandMargin = 10.dp
+private val IslandHandleSize = 54.dp
+private val IslandFlingMinSpeed = 360.dp
+private val IslandFlingMaxSpeed = 5200.dp
+private val IslandFlingBounceSpeed = 1000.dp
+private val IslandFlingStopSpeed = 38.dp
 private const val IslandFlingPauseMillis = 48L
-private val IslandFlingEaseOut = Easing { fraction -> fraction * (2f - fraction) }
 
 internal enum class ReaderIslandEdge {
     Free, Top, Bottom, Left, Right;
@@ -122,18 +122,6 @@ internal data class ReaderIslandPosition(
     }
 }
 
-internal fun readerIslandFlingTravel(velocity: Offset, edge: ReaderIslandEdge, minSpeed: Float, maxTravel: Float): Offset {
-    val direction = when {
-        edge == ReaderIslandEdge.Free -> velocity
-        edge.vertical -> Offset(0f, velocity.y)
-        else -> Offset(velocity.x, 0f)
-    }
-    val speed = direction.getDistance()
-    if (!speed.isFinite() || speed <= minSpeed) return Offset.Zero
-    val travel = ((speed - minSpeed) * (IslandFlingDurationMillis / 2000f)).coerceAtMost(maxTravel)
-    return direction * (travel / speed)
-}
-
 @Composable
 internal fun ReaderIsland(
     position: ReaderIslandPosition, onPlace: (ReaderIslandPosition) -> Unit, content: @Composable () -> Unit,
@@ -162,30 +150,49 @@ internal fun ReaderIsland(
                     val snapDistance = IslandSnapDistance.toPx()
                     val hysteresis = IslandEdgeHysteresis.toPx()
 
-                    fun release(target: ReaderIslandPosition, size: IntSize, velocity: Offset) {
-                        val travel = readerIslandFlingTravel(
-                            velocity, target.edge, IslandFlingMinSpeed.toPx(), IslandFlingMaxTravel.toPx(),
+                    fun resting(at: ReaderIslandPosition, size: IntSize, wasVertical: Boolean): ReaderIslandPosition {
+                        val dock = if (at.edge == ReaderIslandEdge.Free) {
+                            ReaderIslandPosition.fromDrag(at.center(size), size, snapDistance)
+                        } else at
+                        return dock.settled(size, wasVertical, hysteresis)
+                    }
+
+                    fun release(target: ReaderIslandPosition, size: IntSize, handle: LayoutCoordinates, velocity: Offset) {
+                        val launch = readerIslandLaunch(
+                            velocity, target.edge, IslandFlingMinSpeed.toPx(),
+                            IslandFlingMaxSpeed.toPx(), IslandFlingBounceSpeed.toPx(),
                         )
                         val wasVertical = previousVertical
-                        if (travel.getDistance() < 1.dp.toPx()) {
+                        if (launch == null) {
                             place(target.settled(size, wasVertical, hysteresis))
                             return
                         }
 
-                        gliding = target
+                        val initial = target.copy(edge = launch.edge)
+                        gliding = initial
                         glideJob = scope.launch {
-                            val start = target.center(size)
-                            var current = target
-                            val easing = tween<Float>(IslandFlingDurationMillis, easing = IslandFlingEaseOut)
-                            animate(0f, 1f, animationSpec = easing) { fraction, _ ->
-                                current = ReaderIslandPosition.fromDrag(
-                                    start + travel * fraction, size, snapDistance, current.edge, hysteresis,
+                            var current = initial
+                            var motion = ReaderIslandMotion(target.center(size), launch.velocity)
+                            val started = withFrameNanos { it }
+                            var lastFrame = started
+                            while (motion.velocity.getDistance() >= IslandFlingStopSpeed.toPx()) {
+                                val frame = withFrameNanos { it }
+                                if (frame - started > 820_000_000L || !handle.isAttached || viewport?.size != size) break
+                                val duration = ((frame - lastFrame) / 1_000_000_000f).coerceIn(0f, .036f)
+                                lastFrame = frame
+                                val handleSize = IslandHandleSize.roundToPx()
+                                val collisionSize = if (launch.edge == ReaderIslandEdge.Free) {
+                                    IntSize(handleSize, handleSize)
+                                } else handle.size
+                                motion = motion.advance(duration, size, collisionSize, IslandMargin.toPx())
+                                current = initial.copy(
+                                    x = motion.center.x / size.width.coerceAtLeast(1),
+                                    y = motion.center.y / size.height.coerceAtLeast(1),
                                 )
-                                if (target.edge != ReaderIslandEdge.Free) current = current.copy(edge = target.edge)
                                 gliding = current
                             }
                             val finalSize = viewport?.takeIf { it.isAttached }?.size ?: size
-                            place(current.settled(finalSize, wasVertical, hysteresis))
+                            place(resting(current, finalSize, wasVertical))
                             gliding = null
                         }
                     }
@@ -197,7 +204,7 @@ internal fun ReaderIsland(
                         gliding?.let { interrupted ->
                             glideJob?.cancel()
                             gliding = null
-                            place(interrupted.settled(root.size, previousVertical, hysteresis))
+                            place(resting(interrupted, root.size, previousVertical))
                             down.consume()
                         }
 
@@ -227,7 +234,7 @@ internal fun ReaderIsland(
                                             val measured = velocityTracker.calculateVelocity()
                                             Offset(measured.x, measured.y)
                                         } else Offset.Zero
-                                        release(target, size, velocity)
+                                        release(target, size, handle, velocity)
                                     } else if (at != lastPoint) {
                                         velocityTracker.addPosition(change.uptimeMillis, at)
                                         lastMotionTime = change.uptimeMillis
@@ -251,7 +258,7 @@ internal fun ReaderIsland(
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
-                        moving?.edge == ReaderIslandEdge.Free -> Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
+                        moving?.edge == ReaderIslandEdge.Free -> Box(Modifier.size(IslandHandleSize), contentAlignment = Alignment.Center) {
                             Icon(painterResource(R.drawable.inkask_ic_move), contentDescription = "移动浮岛",
                                 tint = Green, modifier = Modifier.size(22.dp))
                         }
@@ -278,7 +285,7 @@ internal fun ReaderIsland(
         val pull = (1f - edgeDistance / (2 * IslandSnapDistance.toPx())).coerceIn(0f, 1f)
         val settle = if (moving == null) dockProgress.value else 0f
         val offset = placement.offset(
-            viewportSize, IntSize(toolbar.width, toolbar.height), 10.dp.roundToPx(), pull + (1f - pull) * settle,
+            viewportSize, IntSize(toolbar.width, toolbar.height), IslandMargin.roundToPx(), pull + (1f - pull) * settle,
         )
         layout(viewportSize.width, viewportSize.height) { toolbar.place(offset) }
     }
