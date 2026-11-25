@@ -4,7 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.text.Spanned
 import android.text.TextPaint
+import android.text.style.BackgroundColorSpan
 import android.text.style.ClickableSpan
 import android.text.style.ReplacementSpan
 import android.view.View
@@ -69,6 +71,7 @@ private class FormulaSpan(
     private val height = ceil(drawable.intrinsicHeight * fit).toInt().coerceAtLeast(1)
     private val descent = (drawable.icon().iconDepth * fit).roundToInt().coerceAtLeast(0)
     private val space = verticalSpace.roundToInt()
+    private val highlightPaint = Paint()
 
     override fun getSize(paint: Paint, text: CharSequence, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
         fm?.let {
@@ -82,8 +85,17 @@ private class FormulaSpan(
     }
 
     override fun draw(canvas: Canvas, text: CharSequence, start: Int, end: Int, x: Float, top: Int, y: Int, bottom: Int, paint: Paint) {
+        val left = x + (rowWidth - width).coerceAtLeast(0) / 2f
+        val formulaTop = (y + descent - height).toFloat()
+        // TextView leaves background drawing to the span for replacement content.
+        (text as? Spanned)?.getSpans(start, end, BackgroundColorSpan::class.java)?.lastOrNull()?.let { highlight ->
+            highlightPaint.color = highlight.backgroundColor
+            val highlightTop = if (rowWidth == 0) top.toFloat() else formulaTop - space / 2f
+            val highlightBottom = if (rowWidth == 0) bottom.toFloat() else formulaTop + height + space / 2f
+            canvas.drawRect(left, highlightTop, left + width, highlightBottom, highlightPaint)
+        }
         canvas.save()
-        canvas.translate(x + (rowWidth - width).coerceAtLeast(0) / 2f, (y + descent - height).toFloat())
+        canvas.translate(left, formulaTop)
         canvas.scale(fit, fit)
         drawable.setBounds(0, 0, drawable.intrinsicWidth, drawable.intrinsicHeight)
         drawable.draw(canvas)
