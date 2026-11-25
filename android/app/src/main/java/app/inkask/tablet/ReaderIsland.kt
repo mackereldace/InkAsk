@@ -1,6 +1,8 @@
 package app.inkask.tablet
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -20,6 +22,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -27,11 +30,18 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 internal val ReaderIslandClearance = 70.dp
 private val IslandSnapDistance = 52.dp
 private val IslandEdgeHysteresis = 8.dp
+private val IslandFlingMinSpeed = 420.dp
+private val IslandFlingMaxTravel = 104.dp
+private const val IslandFlingDurationMillis = 200
+private const val IslandFlingPauseMillis = 48L
+private val IslandFlingEaseOut = Easing { fraction -> fraction * (2f - fraction) }
 
 internal enum class ReaderIslandEdge {
     Free, Top, Bottom, Left, Right;
@@ -112,18 +122,34 @@ internal data class ReaderIslandPosition(
     }
 }
 
+internal fun readerIslandFlingTravel(velocity: Offset, edge: ReaderIslandEdge, minSpeed: Float, maxTravel: Float): Offset {
+    val direction = when {
+        edge == ReaderIslandEdge.Free -> velocity
+        edge.vertical -> Offset(0f, velocity.y)
+        else -> Offset(velocity.x, 0f)
+    }
+    val speed = direction.getDistance()
+    if (!speed.isFinite() || speed <= minSpeed) return Offset.Zero
+    val travel = ((speed - minSpeed) * (IslandFlingDurationMillis / 2000f)).coerceAtMost(maxTravel)
+    return direction * (travel / speed)
+}
+
 @Composable
 internal fun ReaderIsland(
     position: ReaderIslandPosition, onPlace: (ReaderIslandPosition) -> Unit, content: @Composable () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
     val place by rememberUpdatedState(onPlace)
     val previousVertical by rememberUpdatedState(position.vertical)
     var viewport by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var island by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var dragging by remember { mutableStateOf<ReaderIslandPosition?>(null) }
-    val placement = dragging ?: position
+    var gliding by remember { mutableStateOf<ReaderIslandPosition?>(null) }
+    var glideJob by remember { mutableStateOf<Job?>(null) }
+    val moving = dragging ?: gliding
+    val placement = moving ?: position
     val dockProgress = animateFloatAsState(
-        targetValue = if (dragging == null) 1f else 0f,
+        targetValue = if (moving == null) 1f else 0f,
         animationSpec = tween(140),
         label = "Reader island docking",
     )
@@ -133,8 +159,51 @@ internal fun ReaderIsland(
         content = {
             Surface(
                 modifier = Modifier.onGloballyPositioned { island = it }.pointerInput(Unit) {
+                    val snapDistance = IslandSnapDistance.toPx()
+                    val hysteresis = IslandEdgeHysteresis.toPx()
+
+                    fun release(target: ReaderIslandPosition, size: IntSize, velocity: Offset) {
+                        val travel = readerIslandFlingTravel(
+                            velocity, target.edge, IslandFlingMinSpeed.toPx(), IslandFlingMaxTravel.toPx(),
+                        )
+                        val wasVertical = previousVertical
+                        if (travel.getDistance() < 1.dp.toPx()) {
+                            place(target.settled(size, wasVertical, hysteresis))
+                            return
+                        }
+
+                        gliding = target
+                        glideJob = scope.launch {
+                            val start = target.center(size)
+                            var current = target
+                            val easing = tween<Float>(IslandFlingDurationMillis, easing = IslandFlingEaseOut)
+                            animate(0f, 1f, animationSpec = easing) { fraction, _ ->
+                                current = ReaderIslandPosition.fromDrag(
+                                    start + travel * fraction, size, snapDistance, current.edge, hysteresis,
+                                )
+                                if (target.edge != ReaderIslandEdge.Free) current = current.copy(edge = target.edge)
+                                gliding = current
+                            }
+                            val finalSize = viewport?.takeIf { it.isAttached }?.size ?: size
+                            place(current.settled(finalSize, wasVertical, hysteresis))
+                            gliding = null
+                        }
+                    }
+
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val root = viewport?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                        val handle = island?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                        gliding?.let { interrupted ->
+                            glideJob?.cancel()
+                            gliding = null
+                            place(interrupted.settled(root.size, previousVertical, hysteresis))
+                            down.consume()
+                        }
+
+                        var lastMotionTime = down.uptimeMillis
+                        var lastPoint = root.windowToLocal(handle.localToWindow(down.position))
+                        val velocityTracker = VelocityTracker().apply { addPosition(lastMotionTime, lastPoint) }
                         try {
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -142,18 +211,27 @@ internal fun ReaderIsland(
                                     ?: return@awaitEachGesture
                                 if (event.changes.any { it.id != down.id && it.pressed }) return@awaitEachGesture
                                 val released = change.changedToUpIgnoreConsumed()
+                                if (released && change.isConsumed) return@awaitEachGesture
                                 if (dragging != null || (!released && (change.position - down.position).getDistance() > viewConfiguration.touchSlop)) {
-                                    val root = viewport?.takeIf { it.isAttached } ?: return@awaitEachGesture
-                                    val handle = island?.takeIf { it.isAttached } ?: return@awaitEachGesture
+                                    if (!root.isAttached || !handle.isAttached) return@awaitEachGesture
                                     val at = root.windowToLocal(handle.localToWindow(change.position))
+                                    val size = root.size
                                     val target = ReaderIslandPosition.fromDrag(
-                                        at, root.size, IslandSnapDistance.toPx(),
-                                        dragging?.edge ?: ReaderIslandEdge.Free, IslandEdgeHysteresis.toPx(),
+                                        at, size, snapDistance, dragging?.edge ?: ReaderIslandEdge.Free, hysteresis,
                                     )
                                     dragging = target
                                     change.consume()
+
                                     if (released) {
-                                        place(target.settled(root.size, previousVertical, IslandEdgeHysteresis.toPx()))
+                                        val velocity = if (change.uptimeMillis - lastMotionTime <= IslandFlingPauseMillis) {
+                                            val measured = velocityTracker.calculateVelocity()
+                                            Offset(measured.x, measured.y)
+                                        } else Offset.Zero
+                                        release(target, size, velocity)
+                                    } else if (at != lastPoint) {
+                                        velocityTracker.addPosition(change.uptimeMillis, at)
+                                        lastMotionTime = change.uptimeMillis
+                                        lastPoint = at
                                     }
                                 }
                                 if (released || !change.pressed) return@awaitEachGesture
@@ -173,7 +251,7 @@ internal fun ReaderIsland(
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
-                        dragging?.edge == ReaderIslandEdge.Free -> Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
+                        moving?.edge == ReaderIslandEdge.Free -> Box(Modifier.size(54.dp), contentAlignment = Alignment.Center) {
                             Icon(painterResource(R.drawable.inkask_ic_move), contentDescription = "移动浮岛",
                                 tint = Green, modifier = Modifier.size(22.dp))
                         }
@@ -198,7 +276,7 @@ internal fun ReaderIsland(
         val toolbar = items.single().measure(constraints.copy(minWidth = 0, minHeight = 0))
         val edgeDistance = placement.edge.distanceFrom(placement.center(viewportSize), viewportSize)
         val pull = (1f - edgeDistance / (2 * IslandSnapDistance.toPx())).coerceIn(0f, 1f)
-        val settle = if (dragging == null) dockProgress.value else 0f
+        val settle = if (moving == null) dockProgress.value else 0f
         val offset = placement.offset(
             viewportSize, IntSize(toolbar.width, toolbar.height), 10.dp.roundToPx(), pull + (1f - pull) * settle,
         )
