@@ -11,10 +11,14 @@ import androidx.compose.material3.lightColorScheme
 
 class MainActivity : ComponentActivity() {
     internal var answerPinch: AnswerPinch? = null
+    internal var composerOutsideTap: ComposerOutsideTap? = null
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        val pinch = answerPinch ?: return super.dispatchTouchEvent(event)
-        return pinch.dispatch(event) { super.dispatchTouchEvent(it) }
+        val outsideTap = composerOutsideTap
+        val dismissComposer = outsideTap?.isOutsideTap(event) == true
+        val handled = answerPinch?.dispatch(event) { super.dispatchTouchEvent(it) } ?: super.dispatchTouchEvent(event)
+        if (dismissComposer && composerOutsideTap === outsideTap) outsideTap?.dismiss?.invoke()
+        return handled
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

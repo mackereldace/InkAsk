@@ -28,7 +28,6 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -709,8 +708,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                 SelectionPanel(selected.quote, selected.range?.quote?.isBlank() == true,
                     selected.range != null, profile != null, selected.submission.noteId in requests,
                     modifier = overlay.onSizeChanged { popupSize = it }, maxHeight = maxHeight * .72f, bottom = bottom,
-                    templates = model.templates(project), draft = selected.draft, savedImages = previews,
-                    dismiss = { selection = null },
+                    templates = model.templates(project), draft = selected.draft, savedImages = previews, core = workspace.core,
+                    onDismiss = { if (selection?.submission == selected.submission) selection = null },
                     submit = { question, task, screenshot, images, template, save, retained ->
                         request(selected, question, task, screenshot, externalImages = images,
                             templateId = template?.getString("id"), saveOnly = save, retainedImages = retained)
@@ -761,73 +760,3 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
 
 private data class RequestDraft(val project: JSONObject, val prompt: String, val history: List<Turn>,
                                 val images: List<InputImage>, val answer: JSONObject?)
-
-@Composable
-private fun SelectionPanel(quote: String, imageOnly: Boolean, cropAvailable: Boolean, configured: Boolean, busy: Boolean,
-                           modifier: Modifier, maxHeight: Dp, bottom: Boolean, templates: List<JSONObject>,
-                           draft: JSONObject?, savedImages: List<AttachmentPreview>, dismiss: () -> Unit,
-                           submit: (String, String, Boolean, List<Uri>, JSONObject?, Boolean, List<String>) -> Unit,
-                           settings: () -> Unit, report: (String) -> Unit) {
-    var question by remember { mutableStateOf(draft?.optString("draft").orEmpty()) }
-    var capture by remember { mutableStateOf(imageOnly) }
-    var images by remember { mutableStateOf(emptyList<Uri>()) }
-    var retained by remember { mutableStateOf(savedImages) }
-    var template by remember { mutableStateOf(templates.firstOrNull { it.optString("id") == draft?.optString("templateId") }) }
-    fun attach(uris: List<Uri>) {
-        val incoming = (images + uris).distinct()
-        if (incoming.size + retained.size > 4) report("每次最多附 4 张图片。") else images = incoming
-    }
-    fun send(task: String, save: Boolean = false) {
-        if (busy) return
-        if (configured || save) {
-            submit(question, template?.getString("task") ?: task, capture, images, template, save, retained.map { it.id })
-        } else settings()
-    }
-    var tasksOpen by remember { mutableStateOf(false) }
-    Surface(modifier = modifier.widthIn(max = if (bottom) 560.dp else 410.dp).fillMaxWidth(),
-        color = Paper, border = androidx.compose.foundation.BorderStroke(1.dp, Line), shadowElevation = 8.dp, shape = ReaderCardShape) {
-        Column(Modifier.heightIn(max = maxHeight.coerceAtLeast(142.dp)).padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(quote.ifBlank { "选中的 PDF 区域" }, color = Muted, fontSize = 13.sp, maxLines = 2,
-                    modifier = Modifier.weight(1f))
-                Control("×", "关闭选区", action = dismiss)
-            }
-            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                OutlinedTextField(question, { question = it.take(4_000) },
-                    placeholder = { Text("想了解什么？留空则解释所选内容") }, minLines = 3,
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth().pasteImages(::attach).questionShortcut {
-                        send(if (question.isBlank()) "explain" else "custom")
-                    })
-                if (cropAvailable) Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(capture, { capture = it }, enabled = !imageOnly)
-                    Text("附选区截图", color = Muted, fontSize = 13.sp)
-                }
-                AttachmentPreviews(retained + images.map { uri ->
-                    AttachmentPreview(uri.toString(), uri.lastPathSegment?.substringAfterLast('/') ?: "图片", uri = uri)
-                }) { id ->
-                    retained = retained.filterNot { it.id == id }
-                    images = images.filterNot { it.toString() == id }
-                }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    AttachmentControls(::attach, report)
-                    TemplateMenu(templates, template?.getString("id"), automatic = true) { template = it }
-                }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                Spacer(Modifier.weight(1f))
-                Control("保存草稿", enabled = !busy) { send(if (question.isBlank()) "explain" else "custom", true) }
-                Box {
-                    Control("更多任务", enabled = !busy && template == null) { tasksOpen = true }
-                    DropdownMenu(tasksOpen, { tasksOpen = false }, containerColor = Paper) {
-                        listOf("总结" to "summarize", "解释公式" to "formula", "翻译" to "translate").forEach { (label, task) ->
-                            DropdownMenuItem(text = { Text(label) }, onClick = { tasksOpen = false; send(task) })
-                        }
-                    }
-                }
-                Button(onClick = { send(if (question.isBlank()) "explain" else "custom") },
-                    enabled = !busy, shape = ControlShape) { Text(if (busy) "正在保存…" else if (configured) "提问" else "配置模型") }
-            }
-        }
-    }
-}

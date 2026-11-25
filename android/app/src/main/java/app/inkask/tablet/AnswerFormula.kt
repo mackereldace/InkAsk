@@ -26,7 +26,13 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import io.noties.markwon.AbstractMarkwonPlugin
+import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonVisitor
+import io.noties.markwon.ext.latex.JLatexMathBlock
+import io.noties.markwon.ext.latex.JLatexMathNode
+import io.noties.markwon.ext.latex.JLatexMathPlugin
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -43,8 +49,24 @@ private fun formula(latex: String, size: Float): JLatexMathDrawable? {
     }.getOrNull()
 }
 
-internal fun MarkwonVisitor.printFormula(
-    latex: String, block: Boolean, maxWidth: Int, textSize: Float, onOpen: (String) -> Unit,
+internal fun Markwon.Builder.useFormulas(width: Int, textSize: Float, onOpen: ((String) -> Unit)? = null): Markwon.Builder =
+    usePlugin(MarkwonInlineParserPlugin.create())
+        .usePlugin(JLatexMathPlugin.create(textSize) { it.inlinesEnabled(true) })
+        .usePlugin(object : AbstractMarkwonPlugin() {
+            override fun configureVisitor(builder: MarkwonVisitor.Builder) {
+                builder.on(JLatexMathNode::class.java) { visitor, math ->
+                    visitor.printFormula(math.latex(), false, width, textSize, onOpen)
+                }
+                builder.on(JLatexMathBlock::class.java) { visitor, math ->
+                    visitor.ensureNewLine()
+                    visitor.printFormula(math.latex(), true, width, textSize, onOpen)
+                    if (visitor.hasNext(math)) visitor.ensureNewLine()
+                }
+            }
+        })
+
+private fun MarkwonVisitor.printFormula(
+    latex: String, block: Boolean, maxWidth: Int, textSize: Float, onOpen: ((String) -> Unit)?,
 ) {
     if (latex.isBlank()) return
     val start = length()
@@ -58,10 +80,12 @@ internal fun MarkwonVisitor.printFormula(
     }
     val delimiter = if (block) "\$\$" else "\$"
     setSpans(start, AnswerMarkup(delimiter + latex.trim('\r', '\n') + delimiter))
-    setSpans(start, object : ClickableSpan() {
-        override fun onClick(widget: View) { onOpen(latex) }
-        override fun updateDrawState(ds: TextPaint) { ds.isUnderlineText = false }
-    })
+    if (onOpen != null) {
+        setSpans(start, object : ClickableSpan() {
+            override fun onClick(widget: View) { onOpen(latex) }
+            override fun updateDrawState(ds: TextPaint) { ds.isUnderlineText = false }
+        })
+    }
 }
 
 private class FormulaSpan(

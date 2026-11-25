@@ -1,12 +1,15 @@
 package app.inkask.tablet
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.ViewConfiguration
 import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEvent
@@ -21,6 +24,32 @@ internal fun Modifier.questionShortcut(send: () -> Unit): Modifier = onPreviewKe
 }
 
 internal fun PointerEvent.pointerCount(): Int = changes.count { it.pressed }
+
+internal fun Context.mainActivity(): MainActivity? =
+    generateSequence(this) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<MainActivity>().firstOrNull()
+
+// Let the reader receive its touch events while observing taps outside the composer.
+internal class ComposerOutsideTap(context: Context, private val bounds: () -> Rect?, val dismiss: () -> Unit) {
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+    private var down: Offset? = null
+
+    fun isOutsideTap(event: MotionEvent): Boolean {
+        val position = Offset(event.x, event.y)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> down = position.takeIf { bounds()?.contains(position) == false }
+            MotionEvent.ACTION_MOVE -> if (down?.let { (position - it).getDistance() > slop } == true) down = null
+            MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> down = null
+            MotionEvent.ACTION_UP -> {
+                val start = down
+                down = null
+                return start != null && (position - start).getDistance() <= slop &&
+                    event.eventTime - event.downTime < ViewConfiguration.getLongPressTimeout() &&
+                    bounds()?.contains(position) == false
+            }
+        }
+        return false
+    }
+}
 
 internal suspend fun AwaitPointerEventScope.followReaderPinch(
     initial: PointerEvent, onStart: (Offset) -> Unit, onZoom: (Float, Offset) -> Unit,

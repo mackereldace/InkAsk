@@ -3,7 +3,6 @@ package app.inkask.tablet
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
@@ -45,11 +44,9 @@ import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonConfiguration
 import io.noties.markwon.MarkwonVisitor
-import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.ext.latex.JLatexMathBlock
 import io.noties.markwon.ext.latex.JLatexMathNode
 import io.noties.markwon.ext.tables.TablePlugin
-import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -128,9 +125,7 @@ internal fun AnswerSheet(
     }
     val zoom = remember(answerId) { AnswerZoom() }
     val changeScale by rememberUpdatedState(onZoom)
-    val activity = remember(context) {
-        generateSequence(context) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<MainActivity>().firstOrNull()
-    }
+    val activity = remember(context) { context.mainActivity() }
     DisposableEffect(activity, zoom, scroll) {
         val handler = AnswerPinch(context,
             contains = { point ->
@@ -373,8 +368,7 @@ private fun NativeMarkdown(
             val targets = mutableMapOf<String, Pair<String, String>>()
             val markdown = Markwon.builder(view.context)
                 .usePlugin(TablePlugin.create(view.context))
-                .usePlugin(MarkwonInlineParserPlugin.create())
-                .usePlugin(JLatexMathPlugin.create(view.textSize) { it.inlinesEnabled(true) })
+                .useFormulas(textWidth, view.textSize) { formulaViewer(it) }
                 .usePlugin(object : AbstractMarkwonPlugin() {
                     override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
                         builder.linkResolver { _, link ->
@@ -382,14 +376,6 @@ private fun NativeMarkdown(
                         }
                     }
                     override fun configureVisitor(builder: MarkwonVisitor.Builder) {
-                        builder.on(JLatexMathNode::class.java) { visitor, math ->
-                            visitor.printFormula(math.latex(), false, textWidth, view.textSize) { formulaViewer(it) }
-                        }
-                        builder.on(JLatexMathBlock::class.java) { visitor, math ->
-                            visitor.ensureNewLine()
-                            visitor.printFormula(math.latex(), true, textWidth, view.textSize) { formulaViewer(it) }
-                            if (visitor.hasNext(math)) visitor.ensureNewLine()
-                        }
                         builder.on(MarkdownImage::class.java) { visitor, image ->
                             val id = assetReferences.matchEntire(image.destination)?.groupValues?.get(1)
                             val bitmap = images[id]
