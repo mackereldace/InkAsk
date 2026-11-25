@@ -47,8 +47,28 @@ internal enum class ReaderIslandEdge {
     }
 }
 
-internal data class ReaderIslandPosition(val x: Float, val y: Float, val edge: ReaderIslandEdge) {
+internal data class ReaderIslandPosition(
+    val x: Float,
+    val y: Float,
+    val edge: ReaderIslandEdge,
+    private val freeVertical: Boolean = false,
+) {
+    val vertical get() = if (edge == ReaderIslandEdge.Free) freeVertical else edge.vertical
+
     fun center(viewport: IntSize) = Offset(x * viewport.width, y * viewport.height)
+
+    fun settled(viewport: IntSize, previousVertical: Boolean, tolerance: Float): ReaderIslandPosition {
+        if (edge != ReaderIslandEdge.Free) return this
+        val point = center(viewport)
+        val sideDistance = minOf(point.x, viewport.width - point.x)
+        val topOrBottomDistance = minOf(point.y, viewport.height - point.y)
+        val vertical = when {
+            sideDistance + tolerance < topOrBottomDistance -> true
+            topOrBottomDistance + tolerance < sideDistance -> false
+            else -> previousVertical
+        }
+        return copy(freeVertical = vertical)
+    }
 
     fun offset(viewport: IntSize, island: IntSize, margin: Int, attraction: Float = 1f): IntOffset {
         fun axis(space: Int, length: Int, midpoint: Float, atStart: Boolean, atEnd: Boolean): Int {
@@ -97,6 +117,7 @@ internal fun ReaderIsland(
     position: ReaderIslandPosition, onPlace: (ReaderIslandPosition) -> Unit, content: @Composable () -> Unit,
 ) {
     val place by rememberUpdatedState(onPlace)
+    val previousVertical by rememberUpdatedState(position.vertical)
     var viewport by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var island by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var dragging by remember { mutableStateOf<ReaderIslandPosition?>(null) }
@@ -131,7 +152,9 @@ internal fun ReaderIsland(
                                     )
                                     dragging = target
                                     change.consume()
-                                    if (released) place(target)
+                                    if (released) {
+                                        place(target.settled(root.size, previousVertical, IslandEdgeHysteresis.toPx()))
+                                    }
                                 }
                                 if (released || !change.pressed) return@awaitEachGesture
                             }
@@ -154,7 +177,7 @@ internal fun ReaderIsland(
                             Icon(painterResource(R.drawable.inkask_ic_move), contentDescription = "移动浮岛",
                                 tint = Green, modifier = Modifier.size(22.dp))
                         }
-                        placement.edge.vertical -> Column(
+                        placement.vertical -> Column(
                             Modifier.verticalScroll(rememberScrollState()).padding(5.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(4.dp),

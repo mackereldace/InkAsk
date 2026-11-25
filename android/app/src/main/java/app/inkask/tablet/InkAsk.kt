@@ -83,6 +83,7 @@ internal fun InkAsk(workspace: Workspace) {
             ?: ReaderIslandEdge.Bottom
         mutableStateOf(ReaderIslandPosition(
             readerLayout.getFloat("island-x", .5f), readerLayout.getFloat("island-y", 1f), edge,
+            freeVertical = readerLayout.getBoolean("island-free-vertical", false),
         ))
     }
 
@@ -194,7 +195,8 @@ internal fun InkAsk(workspace: Workspace) {
                         onMoveIsland = { position ->
                             islandPosition = position
                             readerLayout.edit().putFloat("island-x", position.x).putFloat("island-y", position.y)
-                                .putString("island-edge", position.edge.name).apply()
+                                .putString("island-edge", position.edge.name)
+                                .putBoolean("island-free-vertical", position.vertical).apply()
                         },
                         openDrawer = { drawer = true },
                         openLibrary = { showLibrary(null) },

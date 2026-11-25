@@ -34,8 +34,8 @@ android {
         applicationId = 'app.inkask.tablet'
         minSdk = 31
         targetSdk = 36
-        versionCode = 14
-        versionName = '0.4.7'
+        versionCode = 15
+        versionName = '0.4.8'
     }
 
     sourceSets {

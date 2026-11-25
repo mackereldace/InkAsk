@@ -4,6 +4,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReaderIslandPositionTest {
@@ -70,5 +72,32 @@ class ReaderIslandPositionTest {
         assertEquals(IntOffset(24, 300), left.offset(viewport, vertical, 10, attraction = 0f))
         assertEquals(IntOffset(17, 300), left.offset(viewport, vertical, 10, attraction = .5f))
         assertEquals(IntOffset(10, 300), left.offset(viewport, vertical, 10))
+    }
+
+    @Test fun aFreeDropCloserToEitherSideStaysAtTheDropPointAndTurnsVertical() {
+        for (x in listOf(188f, 812f)) {
+            val placement = ReaderIslandPosition.fromDrag(Offset(x, 400f), viewport, 52f)
+                .settled(viewport, previousVertical = false, tolerance = 8f)
+
+            assertEquals(ReaderIslandEdge.Free, placement.edge)
+            assertTrue(placement.vertical)
+            assertEquals(IntOffset(x.toInt() - 27, 300), placement.offset(viewport, vertical, 10))
+        }
+    }
+
+    @Test fun aFreeDropCloserToTheTopTurnsHorizontal() {
+        val placement = ReaderIslandPosition.fromDrag(Offset(460f, 165f), viewport, 52f)
+            .settled(viewport, previousVertical = true, tolerance = 8f)
+
+        assertEquals(ReaderIslandEdge.Free, placement.edge)
+        assertFalse(placement.vertical)
+        assertEquals(IntOffset(360, 138), placement.offset(viewport, horizontal, 10))
+    }
+
+    @Test fun aFreeDropWithSimilarDistancesKeepsThePreviousOrientation() {
+        val placement = ReaderIslandPosition.fromDrag(Offset(250f, 255f), viewport, 52f)
+
+        assertTrue(placement.settled(viewport, previousVertical = true, tolerance = 8f).vertical)
+        assertFalse(placement.settled(viewport, previousVertical = false, tolerance = 8f).vertical)
     }
 }
