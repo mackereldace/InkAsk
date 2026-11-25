@@ -363,6 +363,8 @@ private fun NativeMarkdown(
             onView(this)
         }
     }, update = { view ->
+        // The follow-up composer draws its own selection span.
+        view.highlightColor = if (canBranch) android.graphics.Color.TRANSPARENT else PaleGreen.toArgb()
         val size = 16 * scale
         val key = listOf(rendered, size, children.map { it.toString() }, images, textWidth, ready)
         if (view.tag != key) {
