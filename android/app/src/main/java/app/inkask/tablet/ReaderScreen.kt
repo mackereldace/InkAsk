@@ -50,7 +50,10 @@ private data class QuestionSelection(val range: PdfSelection, val parent: JSONOb
                                      val location: Offset? = null, val submission: QuestionSubmission = QuestionSubmission())
 private data class SourcePreviewPart(val label: String, val text: String, val range: PdfRange?, val image: ByteArray?)
 private data class SourcePreview(val source: JSONObject, val size: PageSize, val parts: List<SourcePreviewPart>)
-private data class PdfZoomPivot(val item: Int, val point: Offset, val size: IntSize, val scale: Float)
+private data class PdfZoomPivot(
+    val item: Int, val point: Offset, val size: IntSize, val scale: Float,
+    val distanceToStart: Int?, val distanceToEnd: Int?,
+)
 
 @Composable
 internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel, profile: ModelProfile?,
@@ -94,7 +97,8 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
     val verticalState = rememberLazyListState(page - 1)
     val horizontalState = rememberLazyListState(page - 1)
     val scroll = if (horizontal) horizontalState else verticalState
-    val pageLayouts = remember(pdf, scroll) { mutableMapOf<Int, PdfPageLayout>() }
+    var zoomPadding by remember(scroll) { mutableStateOf<PdfScrollPadding?>(null) }
+    val pageLayouts = remember(pdf) { mutableMapOf<Int, PdfPageLayout>() }
     val notes = project.optJSONArray("notes").objects()
     val focused = notes.firstOrNull { it.optString("id") == noteId }
     val timeline = generateSequence(focused) { note -> notes.firstOrNull { it.optString("id") == note.optString("parentId") } }
@@ -150,6 +154,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
 
     fun go(target: Int, offset: Int = 0) {
         val next = target.coerceIn(1, pdf.pageCount)
+        zoomPadding = null
         page = next
         if (noteId != null) {
             pendingJump = next to offset
@@ -448,13 +453,22 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
         val density = LocalDensity.current
         val crossSize = if (horizontal) viewportSize.height else viewportSize.width
         val fitScale = ((width - 44.dp) / baseWidth).coerceIn(.25f, 3f)
+        val normalPadding = with(density) {
+            if (horizontal) PdfScrollPadding(20.dp.roundToPx(), 20.dp.roundToPx())
+            else PdfScrollPadding(0, 220.dp.roundToPx())
+        }
         fun beginZoom(window: Offset) {
-            val visible = scroll.layoutInfo.visibleItemsInfo.mapNotNull { item ->
+            val items = scroll.layoutInfo.visibleItemsInfo
+            val first = items.firstOrNull { it.index == 0 }
+            val last = items.firstOrNull { it.index == pdf.pageCount - 1 }
+            val visible = items.mapNotNull { item ->
                 val layout = pageLayouts[item.index + 1]?.coordinates?.takeIf { it.isAttached } ?: return@mapNotNull null
                 val local = layout.windowToLocal(window)
                 val x = local.x - local.x.coerceIn(0f, layout.size.width.toFloat())
                 val y = local.y - local.y.coerceIn(0f, layout.size.height.toFloat())
-                PdfZoomPivot(item.index, local, layout.size, scale) to (x * x + y * y)
+                PdfZoomPivot(item.index, local, layout.size, scale,
+                    first?.let { item.offset - it.offset },
+                    last?.let { it.offset + it.size - item.offset }) to (x * x + y * y)
             }
             zoomPivot = visible.minByOrNull { it.second }?.first
             selection = null
@@ -467,12 +481,15 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             if (view != null && pivot != null) {
                 val focus = view.windowToLocal(window)
                 val ratio = next / pivot.scale
-                val main = if (horizontal) pivot.point.x * ratio - focus.x else pivot.point.y * ratio - focus.y
-                scroll.requestScrollToItem(pivot.item, (main + scroll.layoutInfo.beforeContentPadding).roundToInt())
+                val main = if (horizontal) focus.x - pivot.point.x * ratio else focus.y - pivot.point.y * ratio
+                val viewport = if (horizontal) view.size.width else view.size.height
+                val position = pdfZoomPosition(main, viewport, normalPadding,
+                    pivot.distanceToStart?.times(ratio), pivot.distanceToEnd?.times(ratio))
+                zoomPadding = position.padding
+                scroll.requestScrollToItem(pivot.item, position.offset)
                 val extent = (if (horizontal) pivot.size.height else pivot.size.width) * ratio
                 val desired = if (horizontal) focus.y - pivot.point.y * ratio else focus.x - pivot.point.x * ratio
-                val maxPan = ((extent - crossSize) / 2).coerceAtLeast(0f)
-                across = (desired - (crossSize - extent) / 2).coerceIn(-maxPan, maxPan)
+                across = desired - (crossSize - extent) / 2
             }
             scale = next
         }
@@ -485,6 +502,14 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
             val center = viewer.localToWindow(Offset(viewer.size.width / 2f, viewer.size.height / 2f))
             beginZoom(center)
             zoomTo(target, center)
+        }
+        fun fitPage(index: Int = scroll.firstVisibleItemIndex) {
+            selection = null
+            draggingText = null
+            zoomPadding = null
+            across = 0f
+            scale = fitScale
+            scroll.requestScrollToItem(index)
         }
         fun crossPanLimit(): Float {
             val size = pageLayouts[scroll.firstVisibleItemIndex + 1]?.coordinates?.size ?: return 0f
@@ -606,7 +631,7 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     Control("›", "下一页", enabled = page < pdf.pageCount) { go(page + 1) }
                     Spacer(Modifier.weight(1f))
                     Control("−", "缩小") { zoomFromCenter(scale - .1f) }
-                    Control("${(scale * 100).toInt()}%", "重置缩放") { zoomFromCenter(fitScale) }
+                    Control("${(scale * 100).toInt()}%", "重置缩放") { fitPage() }
                     Control("＋", "放大") { zoomFromCenter(scale + .1f) }
                     Box {
                         Control(if (horizontal) "左右 ▾" else "上下 ▾", "页面拼接方向") { directionMenu = true }
@@ -656,12 +681,15 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                     handles = handles,
                     onZoomStart = ::beginZoom,
                     onZoom = { factor, position -> zoomTo(scale * factor, position) },
-                    canPanAcross = { crossPanLimit() > 0f },
-                    onPanAcross = { delta -> val limit = crossPanLimit(); across = (across + delta).coerceIn(-limit, limit) },
+                    canPanAcross = { crossPanLimit() > 0f || across != 0f },
+                    onPanAcross = { delta ->
+                        val limit = crossPanLimit()
+                        across = (across + delta).coerceIn(minOf(-limit, across), maxOf(limit, across))
+                    },
                     onDoubleTap = { position ->
-                        val target = if (abs(scale - fitScale) < .05f) fitScale * 2 else fitScale
                         beginZoom(position)
-                        zoomTo(target, position)
+                        if (abs(scale - fitScale) < .05f) zoomTo(fitScale * 2, position)
+                        else fitPage(zoomPivot?.item ?: scroll.firstVisibleItemIndex)
                     },
                     onPreview = { draggingText = it; if (it != null) { selection = null; located = null } },
                     onSelect = { range, position -> selection = QuestionSelection(range, location = position); located = null },
@@ -670,15 +698,18 @@ internal fun ReaderScreen(doc: Opened, workspace: Workspace, model: ReadingModel
                 val item: @Composable (Int) -> Unit = { number ->
                     val highlight = (draggingText ?: selection?.range)?.fragments?.firstOrNull { it.page == number } ?: located
                     PdfPageView(pdf, number, paperWidth, rotation, noteAnchors[number].orEmpty(), highlight, region, pageLayouts,
-                        handles, horizontal, across, crossSize,
+                        handles, horizontal, across,
                         onSelect = { range, position -> selection = QuestionSelection(PdfSelection(listOf(range)), location = position); located = null },
                         onNote = { id -> selection = null; messageId = null; noteId = id }, report = report)
                 }
+                val padding = zoomPadding ?: normalPadding
+                val leading = with(density) { padding.leading.toDp() }
+                val trailing = with(density) { padding.trailing.toDp() }
                 if (horizontal) LazyRow(state = scroll, modifier = pager, verticalAlignment = Alignment.CenterVertically,
-                    contentPadding = PaddingValues(horizontal = 20.dp)) {
+                    contentPadding = PaddingValues(start = leading, end = trailing)) {
                     items(pdf.pageCount) { item(it + 1) }
                 } else LazyColumn(state = scroll, modifier = pager, horizontalAlignment = Alignment.CenterHorizontally,
-                    contentPadding = PaddingValues(bottom = 220.dp)) {
+                    contentPadding = PaddingValues(top = leading, bottom = trailing)) {
                     items(pdf.pageCount) { item(it + 1) }
                 }
                 HorizontalDivider(color = Line)

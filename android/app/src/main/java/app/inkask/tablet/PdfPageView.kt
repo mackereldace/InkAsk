@@ -38,7 +38,7 @@ internal data class PageNote(val number: Int, val note: JSONObject, val anchor: 
 internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
                          notes: List<PageNote>, located: PdfRange?, region: Boolean,
                          layouts: MutableMap<Int, PdfPageLayout>, handles: List<PdfHandle>,
-                         horizontal: Boolean, across: Float, viewportCrossSize: Int,
+                         horizontal: Boolean, across: Float,
                          onSelect: (PdfRange, Offset?) -> Unit, onNote: (String) -> Unit, report: (String) -> Unit) {
     val nativeSize by produceState<PageSize?>(null, pdf, page) {
         value = runCatching { withContext(Dispatchers.IO) { pdf.size(page) } }.getOrNull()
@@ -62,16 +62,20 @@ internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
         val coordinates = layout
         if (coordinates != null && nativeSize != null) layouts[page] = PdfPageLayout(coordinates, pageSize, rotation)
     }
-    DisposableEffect(layouts, page) { onDispose { layouts.remove(page) } }
-
-    val maxAcross = with(LocalDensity.current) {
-        (((if (horizontal) height else width).toPx() - viewportCrossSize) / 2).coerceAtLeast(0f)
+    DisposableEffect(layouts, page) {
+        onDispose {
+            if (layouts[page]?.coordinates === layout) layouts.remove(page)
+        }
     }
+
     Box(Modifier.offset {
-        val offset = across.coerceIn(-maxAcross, maxAcross).roundToInt()
+        val offset = across.roundToInt()
         if (horizontal) IntOffset(0, offset) else IntOffset(offset, 0)
     }.requiredSize(width, height).background(Color.White)
-        .onGloballyPositioned { layout = it }.semantics { contentDescription = "PDF 第 $page 页" }) {
+        .onGloballyPositioned {
+            layout = it
+            layouts[page] = PdfPageLayout(it, pageSize, rotation)
+        }.semantics { contentDescription = "PDF 第 $page 页" }) {
         pageImage?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
         val regionGesture = if (!region) Modifier else Modifier.pointerInput(page, pageSize, rotation) {
             fun complete() {
