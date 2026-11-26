@@ -4,15 +4,20 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   ArrowDownToLine, BookOpen, ChevronLeft, ChevronRight, CircleHelp, Ellipsis, FileText,
-  FolderOpen, GitBranch, Grid2X2, Highlighter, List, Maximize2, Minus, Move, PanelLeft, Plus, RotateCw, X,
+  Folder, FolderOpen, GitBranch, Grid2X2, Highlighter, List, Maximize2, Minus, Move, PanelLeft, Plus, RotateCw, X,
 } from "lucide-react";
 
 const icons = {
   arrow_down_to_line: ArrowDownToLine, book_open: BookOpen, chevron_left: ChevronLeft,
   chevron_right: ChevronRight, circle_help: CircleHelp, ellipsis: Ellipsis, file_text: FileText,
-  folder_open: FolderOpen, git_branch: GitBranch,
+  folder_open: FolderOpen, git_branch: GitBranch, library_folder: Folder, library_document: FileText,
   grid: Grid2X2, highlighter: Highlighter, list: List, maximize: Maximize2, minus: Minus, move: Move,
   panel_left: PanelLeft, plus: Plus, rotate_cw: RotateCw, close: X,
+};
+
+const libraryArtwork: Record<string, { stroke: string; fill: string; width: number }> = {
+  library_folder: { stroke: "#78A8B4", fill: "#DBEBEF", width: 1.15 },
+  library_document: { stroke: "#93A87E", fill: "#F0F4E8", width: 1.1 },
 };
 
 const directory = resolve(process.argv[2], "drawable");
@@ -36,8 +41,12 @@ await Promise.all(Object.entries(icons).map(async ([name, Component]) => {
   if (!paths.length || paths.some((path) => !path || !/^[\d\s.,+\-eAMLHVCSQTRZamlhvcsqtrz]+$/.test(path))) {
     throw new Error(`Invalid Lucide path for ${name}.`);
   }
+  const artwork = libraryArtwork[name];
   await writeFile(resolve(directory, `inkask_ic_${name}.xml`), `<vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
-${paths.map((path) => `    <path android:pathData="${path}" android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />`).join("\n")}
+${paths.map((path, index) => {
+  const fill = artwork && index === 0 ? ` android:fillColor="${artwork.fill}"` : "";
+  return `    <path android:pathData="${path}"${fill} android:strokeColor="${artwork?.stroke ?? "#FFFFFFFF"}" android:strokeWidth="${artwork?.width ?? 2}" android:strokeLineCap="round" android:strokeLineJoin="round" />`;
+}).join("\n")}
 </vector>\n`);
 }));

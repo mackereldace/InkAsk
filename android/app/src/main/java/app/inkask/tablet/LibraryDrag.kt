@@ -1,14 +1,16 @@
 package app.inkask.tablet
 
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -20,7 +22,8 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,10 +79,10 @@ internal fun librarySelection(
 }
 
 internal class LibraryDragInteraction {
-    data class Source(val item: LibraryItem, val name: String, val coordinates: LayoutCoordinates)
+    data class Source(val item: LibraryItem, val coordinates: LayoutCoordinates)
 
     data class Session(
-        val items: Set<LibraryItem>, val name: String, val folder: Boolean, val point: Offset,
+        val items: Set<LibraryItem>, val grabbed: LibraryItem, val point: Offset,
         val destination: LibraryDropSite? = null,
     )
 
@@ -97,8 +100,8 @@ internal class LibraryDragInteraction {
 
     fun bounds(site: LibraryDropSite): Rect? = coordinates[site]?.takeIf { it.isAttached }?.boundsInWindow()
 
-    fun start(items: Set<LibraryItem>, name: String, folder: Boolean, point: Offset, rules: LibraryDropRules) {
-        session = Session(items, name, folder, point)
+    fun start(items: Set<LibraryItem>, grabbed: LibraryItem, point: Offset, rules: LibraryDropRules) {
+        session = Session(items, grabbed, point)
         update(point, rules)
     }
 
@@ -210,24 +213,37 @@ internal fun Modifier.libraryItemInput(
 }
 
 @Composable
+internal fun LibraryItemIcon(folder: Boolean, size: Int, modifier: Modifier = Modifier) {
+    val icon = if (folder) R.drawable.inkask_ic_library_folder else R.drawable.inkask_ic_library_document
+    Image(painterResource(icon), contentDescription = null, modifier = modifier.size(size.dp))
+}
+
+@Composable
 internal fun LibraryDragPreview(drag: LibraryDragInteraction) {
     val session = drag.session ?: return
-    Surface(
-        modifier = Modifier.offset {
-            val root = drag.root?.takeIf { it.isAttached } ?: return@offset IntOffset.Zero
-            val point = root.windowToLocal(session.point)
-            val x = (point.x + 20.dp.toPx()).coerceIn(0f, (root.size.width - 225.dp.toPx()).coerceAtLeast(0f))
-            val y = (point.y + 20.dp.toPx()).coerceIn(0f, (root.size.height - 52.dp.toPx()).coerceAtLeast(0f))
-            IntOffset(x.roundToInt(), y.roundToInt())
-        }.widthIn(max = 220.dp),
-        color = Paper, shape = ControlShape, shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, if (session.destination == null) Line else Green),
-    ) {
-        Row(Modifier.padding(horizontal = 10.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-            InkIcon(if (session.folder) R.drawable.inkask_ic_folder_open else R.drawable.inkask_ic_file_text)
-            Spacer(Modifier.width(8.dp))
-            Text(if (session.items.size == 1) session.name else "${session.items.size} 个项目",
-                maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+    val stack = remember(session.items, session.grabbed) {
+        listOf(session.grabbed) + session.items.asSequence().filter { it != session.grabbed }.take(2).toList()
+    }
+    val iconSize = 48
+    val previewSize = if (stack.size == 1) iconSize.dp else 64.dp
+    Box(Modifier.absoluteOffset {
+        val root = drag.root?.takeIf { it.isAttached } ?: return@absoluteOffset IntOffset.Zero
+        val point = root.windowToLocal(session.point)
+        val x = (point.x - iconSize.dp.toPx() / 2).coerceIn(0f, (root.size.width - previewSize.toPx()).coerceAtLeast(0f))
+        val y = (point.y - 43.dp.toPx()).coerceIn(0f, (root.size.height - previewSize.toPx()).coerceAtLeast(0f))
+        IntOffset(x.roundToInt(), y.roundToInt())
+    }.size(previewSize).clearAndSetSemantics {}) {
+        for (index in stack.indices.reversed()) {
+            LibraryItemIcon(stack[index].folder, iconSize,
+                Modifier.absoluteOffset(x = (7 * index).dp, y = (3 * index).dp).alpha(if (index == 0) 1f else .8f))
+        }
+        if (stack.size > 1) {
+            Surface(modifier = Modifier.align(Alignment.BottomEnd), color = Green, shape = CircleShape) {
+                Box(Modifier.defaultMinSize(minWidth = 20.dp, minHeight = 20.dp).padding(horizontal = 5.dp),
+                    contentAlignment = Alignment.Center) {
+                    Text(session.items.size.toString(), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Paper)
+                }
+            }
         }
     }
 }

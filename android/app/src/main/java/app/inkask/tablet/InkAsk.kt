@@ -309,7 +309,7 @@ internal fun Control(
 }
 
 @Composable
-internal fun InkIcon(id: Int, color: Color = LocalContentColor.current, size: Int = 16) {
+private fun InkIcon(id: Int, color: Color = LocalContentColor.current, size: Int = 16) {
     Icon(painterResource(id), contentDescription = null, tint = color, modifier = Modifier.size(size.dp))
 }
 
@@ -400,7 +400,7 @@ private fun LibraryScreen(
             name, detail, ref.folder, grid, ref in selected, ref in cut, source,
             draggingTo = ref.folder && dropTarget == itemSite, enabled = !busy,
             modifier = if (ref.folder) Modifier.libraryDropSite(drag, itemSite) else Modifier,
-            body = Modifier.onGloballyPositioned { drag.sources[ref] = LibraryDragInteraction.Source(ref, name, it) },
+            body = Modifier.onGloballyPositioned { drag.sources[ref] = LibraryDragInteraction.Source(ref, it) },
             selectionControl = Modifier.onGloballyPositioned { drag.selectionControls[ref] = it },
             onSelect = { select(ref, additive = true) },
             onClick = { if (selected.isEmpty()) openItem() else select(ref, additive = true) },
@@ -419,7 +419,7 @@ private fun LibraryScreen(
         onHold = { select(it, additive = true) },
         onDragStart = { source, point ->
             val items = if (source.item in selected) selected else setOf(source.item)
-            drag.start(items, source.name, source.item.folder, point, rules)
+            drag.start(items, source.item, point, rules)
         },
         onDrag = { drag.update(it, rules) },
         onDrop = { drag.finish(it, rules, ::moveTo) },
@@ -566,10 +566,11 @@ private fun LibraryTile(
             modifier = body.fillMaxWidth().alpha(if (dragging || cut) .55f else 1f)
                 .semantics { this.selected = selected }.clickable(enabled = enabled, onClick = onClick),
         ) {
-            val icon = if (folder) R.drawable.inkask_ic_folder_open else R.drawable.inkask_ic_file_text
             if (grid) {
                 Column(Modifier.height(138.dp).fillMaxWidth().padding(12.dp)) {
-                    Box(Modifier.height(44.dp), contentAlignment = Alignment.CenterStart) { InkIcon(icon, Green, 26) }
+                    Box(Modifier.height(48.dp), contentAlignment = Alignment.CenterStart) {
+                        LibraryItemIcon(folder, if (folder) 46 else 42)
+                    }
                     Spacer(Modifier.height(4.dp))
                     Text(name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
                         color = Ink, fontSize = 14.sp, lineHeight = 18.sp)
@@ -579,7 +580,7 @@ private fun LibraryTile(
             } else {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 54.dp).heightIn(min = 58.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    InkIcon(icon, Green, 22)
+                    LibraryItemIcon(folder, 25)
                     Text(name, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(details, color = Muted, fontSize = 12.sp)
                 }
