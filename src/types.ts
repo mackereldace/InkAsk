@@ -1,3 +1,5 @@
+import type { PdfPageAnalysis } from "./core/pdf-analysis";
+
 export type Rect = [number, number, number, number];
 export type Task = "explain" | "formula" | "summarize" | "translate" | "custom";
 export interface WordBox {
@@ -13,6 +15,7 @@ export interface PageText {
   status: "pending" | "ready" | "empty" | "error";
   width: number;
   height: number;
+  analysis?: PdfPageAnalysis;
 }
 export interface AnchorFragment {
   page: number;

@@ -1,9 +1,10 @@
 import type { Anchor, PageText, Rect, WordBox } from "../types";
 import type { EvidenceBlock, EvidenceRole } from "./evidence-types";
+import { pdfAnalyzedLines, pdfStructureLabel } from "./pdf-analysis";
 
 interface Span { start: number; end: number; word: WordBox }
 interface Line { start: number; end: number; spans: Span[]; box?: Rect; height: number; blankBefore?: boolean }
-interface Cached { text: string; words: WordBox[]; dimensions: string; blocks: readonly EvidenceBlock[] }
+interface Cached { text: string; words: WordBox[]; dimensions: string; analysis: PageText["analysis"]; blocks: readonly EvidenceBlock[] }
 const cache = new WeakMap<PageText, Cached>();
 const compact = (text: string) => text.normalize("NFKC").replace(/\s+/g, "");
 const median = (values: number[]) => { const sorted = values.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)] || 10; };
@@ -162,11 +163,58 @@ function labelFor(role: EvidenceRole, section?: string, noteNumber?: string): st
   return [section, labels[role]].filter(Boolean).join(" · ");
 }
 
+function blocksWithAnalysis(page: PageText, blocks: EvidenceBlock[], spans: Span[]): EvidenceBlock[] {
+  const parsed = pdfAnalyzedLines(page);
+  if (!parsed) return blocks;
+  const { analysis, lines, hasOriginal } = parsed;
+  const patches = lines.filter(line => line.text !== line.corrected);
+
+  function corrected(start: number, end: number): string {
+    let position = start, text = "";
+    for (const line of patches) {
+      if (line.start < start || line.end > end) continue;
+      text += page.text.slice(position, line.start) + line.corrected;
+      position = line.end;
+    }
+    return text + page.text.slice(position, end);
+  }
+  const structured = analysis.structures.map((structure): EvidenceBlock => {
+    const first = lines[structure.firstLine - 1], last = lines[structure.lastLine - 1];
+    const start = first.start, end = last.end;
+    const text = hasOriginal ? corrected(start, end) : analysis.transcript.join("\n").slice(start, end);
+    const role = structure.kind === "proof" || structure.kind === "definition" ? structure.kind :
+      structure.kind === "remark" ? "note" : structure.kind === "example" ? "body" : "theorem";
+    const range = spans.filter(span => span.start < end && span.end > start);
+    const label = pdfStructureLabel(structure);
+    const continuation = structure.continuesFromPrevious ? "续前页" : structure.continuesOnNext ? "续下页" : "";
+    return { id: `p${page.page}:ai:${hash(`${label}:${text}`)}:${start}-${end}`,
+      page: page.page, start, end, text, role, rects: range.map(span => span.word.rect),
+      label: [label, continuation, "AI 解析"].filter(Boolean).join(" · "),
+      ...(structure.number ? { section: `定理 ${structure.number}` } : {}), structure };
+  });
+
+  if (!hasOriginal) {
+    const text = analysis.transcript.join("\n");
+    const remaining = safeRanges(text, 0, text.length).flatMap(([start, end]): EvidenceBlock[] =>
+      end <= start || structured.some(block => block.start <= start && block.end >= end) ? [] : [{
+        id: `p${page.page}:ai:${hash(text)}:${start}-${end}`, page: page.page, start, end,
+        text: text.slice(start, end), role: "body", rects: [], label: "AI 转写",
+      }]);
+    return [...structured, ...remaining];
+  }
+  const remaining = blocks.filter(block => !structured.some(span => span.start <= block.start && span.end >= block.end))
+    .map(block => {
+      const text = corrected(block.start, block.end);
+      return text === block.text ? block : { ...block, id: block.id + ":ai:" + hash(text), text, label: block.label + " · AI 校订" };
+    });
+  return [...structured, ...remaining];
+}
+
 /** A read-only, versioned evidence index; neither source text nor saved notes change. */
 export function pageEvidenceBlocks(page: PageText): readonly EvidenceBlock[] {
   const dimensions = `${page.source}:${page.width}:${page.height}`;
   const cached = cache.get(page);
-  if (cached?.text === page.text && cached.words === page.words && cached.dimensions === dimensions) return cached.blocks;
+  if (cached?.text === page.text && cached.words === page.words && cached.dimensions === dimensions && cached.analysis === page.analysis) return cached.blocks;
   const protectedRanges = protectedSpans(page.text);
   const spans = spansFor(page), lines = linesFor(page, spans), normal = median(spans.map((s) => s.word.rect[3] - s.word.rect[1]));
   const version = hash(`${dimensions}:${page.text}:${spans.map((s) => s.word.rect.join(",")).join(";")}`);
@@ -227,8 +275,8 @@ export function pageEvidenceBlocks(page: PageText): readonly EvidenceBlock[] {
     if (caption) flush();
   }
   flush();
-  const result = Object.freeze(blocks);
-  cache.set(page, { text: page.text, words: page.words, dimensions, blocks: result });
+  const result = Object.freeze(blocksWithAnalysis(page, blocks, spans));
+  cache.set(page, { text: page.text, words: page.words, dimensions, analysis: page.analysis, blocks: result });
   return result;
 }
 

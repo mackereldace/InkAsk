@@ -5,18 +5,21 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,20 +27,29 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.isMetaPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -73,6 +85,7 @@ internal fun InkAsk(workspace: Workspace) {
     var opened by remember { mutableStateOf<Opened?>(null) }
     var folder by remember { mutableStateOf<String?>(null) }
     var drawer by remember { mutableStateOf(false) }
+    var splitUpgrade by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var trouble by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -150,21 +163,7 @@ internal fun InkAsk(workspace: Workspace) {
         Modifier.windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility.only(WindowInsetsSides.Top))
     } else Modifier
     Box(Modifier.fillMaxSize().background(Desk).safeDrawingPadding().then(libraryStatusInset).imePadding()) {
-        Column(Modifier.fillMaxSize()) {
-            if (opened == null) {
-                Row(
-                    Modifier.fillMaxWidth().height(50.dp).background(Bar).padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Control("▣", "显示资料侧栏") { drawer = !drawer }
-                    Spacer(Modifier.width(10.dp))
-                    InkIcon(R.drawable.inkask_ic_book_open, color = Muted)
-                    Text("阅读空间", color = Muted, modifier = Modifier.clickable { showLibrary(null) }.padding(6.dp))
-                    Spacer(Modifier.weight(1f))
-                    Control("?", "帮助与设置") { showSettings = true }
-                }
-                HorizontalDivider(color = Line)
-            }
+        Column(Modifier.fillMaxSize().then(if (drawer && opened == null) Modifier.clearAndSetSemantics {} else Modifier)) {
             if (trouble.isNotBlank()) {
                 Row(Modifier.fillMaxWidth().background(Color(0xFFFFF2DB)).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(trouble, Modifier.weight(1f), fontSize = 13.sp)
@@ -174,6 +173,7 @@ internal fun InkAsk(workspace: Workspace) {
             val document = opened
             if (document == null) {
                 LibraryScreen(library, folder, query, { query = it }, { folder = it }, busy, addPdf, importArchive,
+                    openSidebar = { drawer = !drawer }, openSettings = { showSettings = true },
                     sample = { act { open(withContext(Dispatchers.IO) { workspace.sample(folder) }); refresh() } },
                     open = { item -> act { open(item) } },
                     create = { name -> act { withContext(Dispatchers.IO) { workspace.createFolder(name, folder) }; refresh() } },
@@ -188,6 +188,8 @@ internal fun InkAsk(workspace: Workspace) {
                 )
             } else {
                 key(document.item.id) {
+                    var readerFolder by remember { mutableStateOf(library.membership[document.item.id]) }
+                    var readerQuery by remember { mutableStateOf("") }
                     DisposableEffect(document.pdf) {
                         onDispose { scope.launch(Dispatchers.IO) { document.pdf.close() } }
                     }
@@ -208,35 +210,47 @@ internal fun InkAsk(workspace: Workspace) {
                             export.launch(document.item.name.substringBeforeLast('.') + kind.suffix)
                         },
                         report = { trouble = it },
+                        sidebar = { notes, openNote ->
+                            LibrarySidebar(
+                                drawer, library, readerFolder, document.item.id, readerQuery, { readerQuery = it },
+                                busy, onDismiss = { drawer = false },
+                                onFolder = { target -> readerFolder = target; readerQuery = "" },
+                                onDocument = { item ->
+                                    if (item.id == document.item.id) drawer = false else act {
+                                        open(item)
+                                        folder = library.membership[item.id]
+                                        query = ""
+                                    }
+                                },
+                                openPdf = addPdf, importArchive = importArchive,
+                                openSettings = { showSettings = true; drawer = false },
+                                reader = ReaderSidebarActions(notes,
+                                    openNote = { id -> openNote(id); drawer = false },
+                                    splitNote = { splitUpgrade = true },
+                                    splitDocument = { splitUpgrade = true },
+                                ),
+                            )
+                        },
                     )
                 }
             }
         }
-        if (drawer) {
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .16f)).clickable { drawer = false })
-            Column(Modifier.fillMaxHeight().width(238.dp).background(Bar).padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("inkask", color = Green, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                    Control("×", "关闭资料侧栏") { drawer = false }
-                }
-                Text("我的阅读空间", modifier = Modifier.padding(vertical = 16.dp), fontWeight = FontWeight.SemiBold)
-                Button(onClick = addPdf, shape = ControlShape, modifier = Modifier.fillMaxWidth()) { Text("＋ 打开 PDF") }
-                Spacer(Modifier.height(16.dp))
-                OutlinedTextField(query, { query = it }, label = { Text("搜索资料") }, singleLine = true)
-                LazyColumn(Modifier.weight(1f).padding(top = 14.dp)) {
-                    item { Control("阅读空间", "阅读空间") { showLibrary(null) } }
-                    items(library.folders.filter { it.parentId == null || it.parentId == folder }) {
-                        Control(it.name, it.name) { showLibrary(it.id) }
-                    }
-                    items(library.documents.filter { it.name.contains(query, true) }) {
-                        Control(it.name, it.name) { act { open(it) } }
-                    }
-                }
-                Control("导入 InkAsk 项目", "导入 InkAsk 项目", action = importArchive)
-                Control("API 与模板") { showSettings = true; drawer = false }
-                Text("文档保存在你的设备上", color = Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
-            }
-        }
+        if (opened == null) LibrarySidebar(
+            drawer, library, folder, null, query, { query = it }, busy, onDismiss = { drawer = false },
+            onFolder = { target -> query = ""; showLibrary(target) },
+            onDocument = { item -> act { open(item); folder = library.membership[item.id]; query = "" } },
+            openPdf = addPdf, importArchive = importArchive,
+            openSettings = { showSettings = true; drawer = false },
+        )
+    }
+    if (splitUpgrade) {
+        AlertDialog(
+            onDismissRequest = { splitUpgrade = false },
+            title = { Text("分屏是升级版功能") },
+            text = { Text("升级版支持同时阅读两份 PDF，或并排查看 PDF 和追问。") },
+            confirmButton = { TextButton(onClick = { splitUpgrade = false }) { Text("知道了") } },
+            containerColor = Paper,
+        )
     }
     if (showSettings) {
         val document = opened
@@ -317,6 +331,7 @@ private fun InkIcon(id: Int, color: Color = LocalContentColor.current, size: Int
 private fun LibraryScreen(
     library: Library, folderId: String?, query: String, search: (String) -> Unit, navigate: (String?) -> Unit,
     busy: Boolean, addPdf: () -> Unit, importArchive: () -> Unit, sample: () -> Unit,
+    openSidebar: () -> Unit, openSettings: () -> Unit,
     open: (PdfItem) -> Unit, create: (String) -> Unit, rename: (String, String) -> Unit, removeFolder: (String) -> Unit,
     move: (Set<LibraryItem>, String?, () -> Unit) -> Unit, remove: (Set<String>) -> Unit,
 ) {
@@ -325,13 +340,35 @@ private fun LibraryScreen(
     var selected by remember(folderId, query) { mutableStateOf(setOf<LibraryItem>()) }
     var cut by remember { mutableStateOf(setOf<LibraryItem>()) }
     var anchor by remember(folderId, query) { mutableStateOf<LibraryItem?>(null) }
-    val drag = remember(folderId, query, grid) { LibraryDragInteraction() }
+    val canvasIcons = grid && query.isBlank()
+    val context = LocalContext.current
+    val iconPreferences = remember(context) {
+        LibraryIconPreferences(context.getSharedPreferences("library-icons", Context.MODE_PRIVATE))
+    }
+    var snapIcons by remember(folderId, iconPreferences) { mutableStateOf(iconPreferences.snaps(folderId)) }
+    var placementMenu by remember(folderId, canvasIcons) { mutableStateOf(false) }
+    val drag = remember(folderId, query, grid, snapIcons) { LibraryDragInteraction(grid, canvasIcons) }
     val rules = remember(library) { LibraryDropRules(library) }
     val gridState = key(folderId, query, grid) { rememberLazyGridState() }
-    val draggedItems by remember(drag) { derivedStateOf { drag.session?.items.orEmpty() } }
+    val iconScroll = remember(folderId, canvasIcons) { LibraryIconScroll() }
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    val iconWidth = with(density) { viewport.width.toDp().value }
+    val columns = libraryIconColumns(iconWidth)
+    var savedIcons by remember(folderId, columns) {
+        mutableStateOf(iconPreferences.read(folderId, columns))
+    }
+    var shiftedIcons by remember(folderId, columns, snapIcons) { mutableStateOf(emptyMap<LibraryItem, Offset>()) }
+    val draggedItems by remember(drag) { derivedStateOf { drag.active?.items.orEmpty() } }
+    var marquee by remember(drag) { mutableStateOf<Rect?>(null) }
+    var selectionPreview by remember(drag) { mutableStateOf<Set<LibraryItem>?>(null) }
+    val highlightedSelection = selectionPreview ?: selected
     val dropTarget by remember(drag) { derivedStateOf { drag.session?.destination } }
-    val scrollEdge = with(LocalDensity.current) { 56.dp.toPx() }
+    val dragMoving by remember(drag) { derivedStateOf { drag.session?.moving == true } }
+    val scrollEdge = with(LocalDensity.current) { 44.dp.toPx() }
     val scrollSpeed = with(LocalDensity.current) { 1080.dp.toPx() }
+    val folderEdgeInset = with(LocalDensity.current) { 10.dp.toPx() }
+    val dropTolerance = with(LocalDensity.current) { 6.dp.toPx() }
     val contentsSite = LibraryDropSite(LibraryDropKind.Contents, folderId)
     var folderMenu by remember { mutableStateOf<Folder?>(null) }
     var moving by remember { mutableStateOf(setOf<LibraryItem>()) }
@@ -342,6 +379,15 @@ private fun LibraryScreen(
     val files = library.documents.filter { if (query.isBlank()) library.membership[it.id] == folderId else it.name.contains(query.trim(), true) }
         .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, PdfItem::name))
     val order = folders.map { LibraryItem(it.id, true) } + files.map { LibraryItem(it.id, false) }
+    val iconLayout = remember(iconWidth, density.fontScale, order, savedIcons, canvasIcons, snapIcons) {
+        if (canvasIcons && iconWidth > 0f) LibraryIconLayout(iconWidth, density.fontScale, order, savedIcons, snapIcons)
+        else null
+    }
+    val foldersById = remember(folders) { folders.associateBy(Folder::id) }
+    val filesById = remember(files) { files.associateBy(PdfItem::id) }
+    val folderSizes = remember(library) {
+        (library.folders.mapNotNull { it.parentId } + library.membership.values).groupingBy { it }.eachCount()
+    }
     val trail = generateSequence(folder) { next -> library.folders.firstOrNull { it.id == next.parentId } }
         .take(library.folders.size).toList().asReversed()
     fun select(item: LibraryItem, additive: Boolean, range: Boolean = false) {
@@ -360,48 +406,115 @@ private fun LibraryScreen(
             moving = emptySet()
         }
     }
+    fun placement(session: LibraryDragInteraction.Session): LibraryDragInteraction.Placement? {
+        val layout = iconLayout ?: return null
+        val bounds = drag.bounds(contentsSite) ?: return null
+        val movement = layout.movementBounds(session.items, session.grabbed) ?: return null
+        val scale = density.density
+        val canvasOrigin = bounds.topLeft - Offset(0f, iconScroll.offset)
+        val inset = (session.iconSize / 2f + 10f) * scale
+        val horizontalInset = inset.coerceAtMost(bounds.width / 2f)
+        val verticalInset = inset.coerceAtMost(bounds.height / 2f)
+        val limits = Rect(
+            maxOf(bounds.left + horizontalInset, canvasOrigin.x + movement.left * scale),
+            maxOf(bounds.top + verticalInset, canvasOrigin.y + movement.top * scale),
+            minOf(bounds.right - horizontalInset, canvasOrigin.x + movement.right * scale),
+            bounds.bottom - verticalInset,
+        )
+        val colliders = {
+            val movingIcon = libraryIconCollider(Offset.Zero, session.grabbed.folder, scale)
+            layout.spots.asSequence().filter { (item, _) -> item !in session.items }
+                .map { (item, position) ->
+                    val center = layout.center(position) * scale + canvasOrigin
+                    libraryIconCollider(center, item.folder, scale).expandedFor(movingIcon)
+                }.filter { it.rect.overlaps(limits) }.toList()
+        }
+        return LibraryDragInteraction.Placement(limits, colliders) { center ->
+            val desired = (center - canvasOrigin) / scale
+            val positions = layout.place(session.items, session.grabbed, desired) ?: return@Placement null
+            if (snapIcons) {
+                val previous = layout.savedPositions()
+                shiftedIcons = layout.spots.filter { (item, _) -> item !in session.items && positions[item] != previous[item] }
+            }
+            savedIcons = positions
+            iconPreferences.write(folderId, layout.columns, positions)
+            cut = cut - session.items
+            layout.center(positions.getValue(session.grabbed)) * scale + canvasOrigin
+        }
+    }
 
-    LaunchedEffect(drag, draggedItems.isNotEmpty(), gridState, rules, scrollEdge, scrollSpeed) {
-        if (drag.session == null) return@LaunchedEffect
-        var previous = withFrameNanos { it }
-        while (drag.session != null) {
+    fun setPlacementMode(snap: Boolean) {
+        placementMenu = false
+        if (snap == snapIcons) return
+        val current = iconLayout
+        if (current == null) {
+            iconPreferences.setSnap(folderId, snap)
+        } else {
+            val positions = current.savedPositions()
+            savedIcons = if (snap) LibraryIconLayout(iconWidth, density.fontScale, order, positions, snap = true)
+                .savedPositions() else positions
+            iconPreferences.write(folderId, columns, savedIcons, snap)
+        }
+        snapIcons = snap
+    }
+
+    DisposableEffect(drag) {
+        onDispose { drag.glide?.let(drag::finishGlide) }
+    }
+    LaunchedEffect(drag, viewport) {
+        drag.glide?.let(drag::finishGlide)
+    }
+
+    LaunchedEffect(drag, dragMoving, gridState, iconScroll, rules, scrollEdge, scrollSpeed, folderEdgeInset, dropTolerance) {
+        if (!dragMoving) return@LaunchedEffect
+        var previousFrame = withFrameNanos { it }
+        var edgeSince = previousFrame
+        var direction = 0
+        while (drag.session?.moving == true) {
             val frame = withFrameNanos { it }
-            val elapsed = ((frame - previous) / 1_000_000_000f).coerceAtMost(.04f)
-            previous = frame
+            val elapsed = ((frame - previousFrame) / 1_000_000_000f).coerceAtMost(.04f)
+            previousFrame = frame
             val session = drag.session ?: break
             val bounds = drag.bounds(contentsSite) ?: continue
-            if (session.point.x !in bounds.left..bounds.right ||
-                session.point.y !in (bounds.top - scrollEdge)..(bounds.bottom + scrollEdge)) continue
-            val delta = when {
-                session.point.y < bounds.top + scrollEdge -> -scrollSpeed *
-                    ((bounds.top + scrollEdge - session.point.y) / scrollEdge).coerceIn(0f, 1f)
-                session.point.y > bounds.bottom - scrollEdge -> scrollSpeed *
-                    ((session.point.y - bounds.bottom + scrollEdge) / scrollEdge).coerceIn(0f, 1f)
-                else -> 0f
+            val strength = when (session.destination?.kind) {
+                LibraryDropKind.Up, LibraryDropKind.Path -> 0f
+                else -> libraryDragEdgeStrength(session.point, bounds, scrollEdge, folderEdgeInset,
+                    session.destination?.kind == LibraryDropKind.Folder)
             }
-            if (delta != 0f) {
-                gridState.scrollBy(delta * elapsed)
-                drag.session?.let { drag.update(it.point, rules) }
+            val nextDirection = if (strength == 0f) 0 else strength.compareTo(0f)
+            if (nextDirection != direction) {
+                direction = nextDirection
+                edgeSince = frame
+            }
+            if (direction != 0 && frame - edgeSince >= 170_000_000L) {
+                val delta = strength * scrollSpeed * elapsed
+                if (canvasIcons) iconScroll.scrollBy(delta) else gridState.scrollBy(delta)
+                drag.session?.let { drag.update(it.point, rules, dropTolerance) }
             }
         }
     }
 
     @Composable
-    fun entry(ref: LibraryItem, name: String, detail: String, openItem: () -> Unit) {
+    fun entry(ref: LibraryItem, name: String, detail: String, rowIndex: Int, openItem: () -> Unit) {
         val itemSite = LibraryDropSite(LibraryDropKind.Folder, ref.id)
         val source = ref in draggedItems
         DisposableEffect(drag, ref) {
             onDispose {
                 drag.sources.remove(ref)
-                drag.selectionControls.remove(ref)
+                drag.icons.remove(ref)
+            }
+        }
+        SideEffect {
+            val existing = drag.sources[ref]
+            if (existing != null && existing.order != rowIndex) {
+                drag.sources[ref] = existing.copy(order = rowIndex)
             }
         }
         LibraryTile(
-            name, detail, ref.folder, grid, ref in selected, ref in cut, source,
+            name, detail, ref.folder, grid, rowIndex % 2 != 0, ref in highlightedSelection, ref in cut, source,
             draggingTo = ref.folder && dropTarget == itemSite, enabled = !busy,
-            modifier = if (ref.folder) Modifier.libraryDropSite(drag, itemSite) else Modifier,
-            body = Modifier.onGloballyPositioned { drag.sources[ref] = LibraryDragInteraction.Source(ref, it) },
-            selectionControl = Modifier.onGloballyPositioned { drag.selectionControls[ref] = it },
+            body = Modifier.onGloballyPositioned { drag.sources[ref] = LibraryDragInteraction.Source(ref, it, rowIndex) },
+            icon = Modifier.onGloballyPositioned { drag.icons[ref] = it },
             onSelect = { select(ref, additive = true) },
             onClick = { if (selected.isEmpty()) openItem() else select(ref, additive = true) },
         )
@@ -417,38 +530,92 @@ private fun LibraryScreen(
             } else select(ref, additive, range)
         },
         onHold = { select(it, additive = true) },
-        onDragStart = { source, point ->
+        onLift = { source, point, mouse ->
             val items = if (source.item in selected) selected else setOf(source.item)
-            drag.start(items, source.item, point, rules)
+            drag.lift(items, source.item, point, mouse)
         },
-        onDrag = { drag.update(it, rules) },
-        onDrop = { drag.finish(it, rules, ::moveTo) },
+        onDrag = { drag.update(it, rules, dropTolerance) },
+        onDrop = { point, velocity ->
+            val launch = if (canvasIcons) with(density) {
+                readerIslandLaunch(
+                    velocity, ReaderIslandEdge.Free, IslandFlingMinSpeed.toPx(),
+                    IslandFlingMaxSpeed.toPx(), IslandFlingBounceSpeed.toPx(), IslandFlingEasterEggSpeed.toPx(),
+                )
+            } else null
+            drag.finish(point, launch, rules, dropTolerance, ::placement, ::moveTo)
+        },
         onCancel = drag::cancel,
+        marqueeArea = { if (order.isEmpty()) null else drag.bounds(contentsSite) },
+        onMarquee = { box, modifiers ->
+            val hits = drag.sources.values.asSequence().filter {
+                it.coordinates.isAttached && it.coordinates.boundsInWindow().overlaps(box)
+            }.map { it.item }.toSet()
+            marquee = box
+            selectionPreview = when {
+                modifiers.isCtrlPressed || modifiers.isMetaPressed -> (selected - hits) + (hits - selected)
+                modifiers.isShiftPressed -> selected + hits
+                else -> hits
+            }
+        },
+        onMarqueeEnd = { commit ->
+            if (commit) selectionPreview?.let {
+                selected = it
+                anchor = order.lastOrNull { item -> item in it }
+            }
+            selectionPreview = null
+            marquee = null
+        },
+        onBlankTap = { clearSelection() },
     )
     Box(Modifier.fillMaxSize().onGloballyPositioned { drag.root = it }.then(gestureInput)) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 18.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(folder?.name ?: "阅读空间", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.SemiBold,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                OutlinedButton(onClick = { editing = Pair(null, "") }, shape = ControlShape, enabled = !busy) {
-                    Text("新建文件夹")
-                }
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = addPdf, shape = ControlShape, enabled = !busy) { Text("＋ 打开 PDF") }
-            }
-            Spacer(Modifier.height(22.dp))
-            FlowRow(Modifier.fillMaxWidth().background(Bar, ReaderCardShape).padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.Center,
-                itemVerticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxSize().background(Paper)) {
+            Row(
+                Modifier.fillMaxWidth().background(Bar).padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Control("显示资料侧栏", action = openSidebar)
                 val up = LibraryDropSite(LibraryDropKind.Up, folder?.parentId)
                 Box(if (folder == null) Modifier else Modifier.libraryDropSite(drag, up)) {
                     Control("‹", "返回上一级文件夹", enabled = folder != null && !busy,
                         active = dropTarget == up) { navigate(folder?.parentId) }
                 }
-                Control("▦", "图标视图", active = grid) { grid = true }
-                Control("☰", "列表视图", active = !grid) { grid = false }
+                Text(
+                    folder?.name ?: "阅读空间", Modifier.weight(1f).padding(horizontal = 8.dp),
+                    color = Ink, fontSize = 19.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Row(Modifier.background(Desk, ControlShape)) {
+                    Control("图标视图", active = grid) { grid = true }
+                    Control("列表视图", active = !grid) { grid = false }
+                }
+                Control("帮助与设置", action = openSettings)
+            }
+            FlowRow(
+                Modifier.fillMaxWidth().background(Bar).padding(start = 16.dp, end = 16.dp, bottom = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                itemVerticalAlignment = Alignment.CenterVertically,
+            ) {
+                LibrarySearch(query, search)
+                Control("新建文件夹", enabled = !busy) { editing = Pair(null, "") }
+                Control("打开 PDF", enabled = !busy, action = addPdf)
+                if (canvasIcons) Box {
+                    Control(if (snapIcons) "吸附网格 ▾" else "自由摆放 ▾", "图标摆放方式", enabled = !busy) {
+                        placementMenu = true
+                    }
+                    DropdownMenu(
+                        expanded = placementMenu, onDismissRequest = { placementMenu = false },
+                        shape = ControlShape, containerColor = Paper, tonalElevation = 0.dp,
+                    ) {
+                        for (snap in listOf(false, true)) {
+                            DropdownMenuItem(
+                                text = { Text(if (snap) "吸附网格" else "自由摆放") },
+                                trailingIcon = { if (snap == snapIcons) Text("✓", color = Green) },
+                                modifier = Modifier.semantics { this.selected = snap == snapIcons },
+                                onClick = { setPlacementMode(snap) },
+                            )
+                        }
+                    }
+                }
                 Control("剪切", enabled = selected.isNotEmpty() && !busy) { cut = selected; clearSelection() }
                 Control("粘贴", enabled = cut.isNotEmpty() && !busy) { moveTo(cut, folderId) }
                 if (selected.isNotEmpty()) {
@@ -460,31 +627,13 @@ private fun LibraryScreen(
                     folderMenu = library.folders.firstOrNull { it.id == singleFolder.id }
                 }
                 if (selected.isNotEmpty() && selected.none { it.folder }) Control("删除") { confirmRemove = true }
-                Spacer(Modifier.width(8.dp))
-                OutlinedTextField(query, search, singleLine = true, placeholder = { Text("搜索资料与文件夹") }, modifier = Modifier.widthIn(max = 260.dp))
-            }
-            FlowRow(Modifier.padding(vertical = 6.dp), itemVerticalAlignment = Alignment.CenterVertically) {
-                val rootSite = LibraryDropSite(LibraryDropKind.Path, null)
-                Box(Modifier.libraryDropSite(drag, rootSite)) {
-                    Control("阅读空间", active = dropTarget == rootSite, enabled = !busy) { navigate(null) }
-                }
-                trail.forEach { item ->
-                    Text("›", color = Muted)
-                    val site = LibraryDropSite(LibraryDropKind.Path, item.id)
-                    Box(Modifier.libraryDropSite(drag, site)) {
-                        Control(item.name, active = dropTarget == site, enabled = !busy) { navigate(item.id) }
-                    }
-                }
             }
             HorizontalDivider(color = Line)
             val overContents = dropTarget == contentsSite
-            val emptyArea = if (selected.isEmpty()) Modifier else Modifier.pointerInput(folderId, query) {
-                detectTapGestures { clearSelection() }
-            }
-            Surface(
-                modifier = Modifier.fillMaxWidth().weight(1f).libraryDropSite(drag, contentsSite).then(emptyArea),
-                shape = ReaderCardShape, color = if (overContents) PaleGreen else Desk,
-                border = if (overContents) BorderStroke(2.dp, Green) else null,
+            Box(
+                Modifier.fillMaxWidth().weight(1f).onSizeChanged { viewport = it }
+                    .libraryDropSite(drag, contentsSite)
+                    .then(if (overContents) Modifier.border(2.dp, Green) else Modifier),
             ) {
                 if (folders.isEmpty() && files.isEmpty()) {
                     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -493,23 +642,81 @@ private fun LibraryScreen(
                         OutlinedButton(onClick = importArchive, shape = ControlShape, enabled = !busy) { Text("导入 InkAsk 项目") }
                         if (library.documents.isEmpty()) Control("先打开示例资料", enabled = !busy, action = sample)
                     }
-                } else {
-                    LazyVerticalGrid(columns = if (grid) GridCells.Adaptive(154.dp) else GridCells.Fixed(1), state = gridState,
-                        modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(folders, key = { "folder-${it.id}" }) { item ->
-                            val size = library.folders.count { it.parentId == item.id } + library.membership.count { it.value == item.id }
-                            entry(LibraryItem(item.id, true), item.name, "$size 个项目") { navigate(item.id) }
+                } else if (canvasIcons) {
+                    iconLayout?.let { layout ->
+                        LibraryIconCanvas(layout, iconScroll, viewport.height, shiftedIcons) { ref, index ->
+                            if (ref.folder) {
+                                val item = foldersById.getValue(ref.id)
+                                entry(ref, item.name, "", index) { navigate(item.id) }
+                            } else {
+                                val item = filesById.getValue(ref.id)
+                                entry(ref, item.name, "", index) { open(item) }
+                            }
                         }
-                        items(files, key = { "document-${it.id}" }) { item ->
-                            entry(LibraryItem(item.id, false), item.name, "${item.pageCount} 页 · PDF") { open(item) }
+                    }
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        if (!grid) {
+                            Row(
+                                Modifier.fillMaxWidth().background(Bar).padding(start = 52.dp, end = 38.dp)
+                                    .heightIn(min = 32.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("名称", Modifier.weight(1f), color = Muted, fontSize = 12.sp)
+                                Text("详情", Modifier.width(LibraryDetailWidth), color = Muted, fontSize = 12.sp)
+                            }
+                            HorizontalDivider(color = Line)
+                        }
+                        LazyVerticalGrid(
+                            columns = if (grid) GridCells.Adaptive(124.dp) else GridCells.Fixed(1),
+                            state = gridState, modifier = Modifier.fillMaxSize(),
+                            contentPadding = if (grid) PaddingValues(horizontal = 16.dp, vertical = 16.dp) else PaddingValues(end = 20.dp),
+                            verticalArrangement = Arrangement.spacedBy(if (grid) 10.dp else 0.dp),
+                        ) {
+                            itemsIndexed(folders, key = { _, item -> "folder-${item.id}" }) { index, item ->
+                                val size = folderSizes[item.id] ?: 0
+                                entry(LibraryItem(item.id, true), item.name, "$size 个项目", index) { navigate(item.id) }
+                            }
+                            itemsIndexed(files, key = { _, item -> "document-${item.id}" }) { index, item ->
+                                entry(LibraryItem(item.id, false), item.name, "${item.pageCount} 页 · PDF",
+                                    folders.size + index) { open(item) }
+                            }
                         }
                     }
                 }
             }
             HorizontalDivider(color = Line)
-            Text(if (selected.isEmpty()) "${folders.size} 个文件夹，${files.size} 份资料" else "已选中 ${selected.size} 项",
-                modifier = Modifier.padding(vertical = 10.dp), color = Muted, fontSize = 12.sp)
+            Row(
+                Modifier.fillMaxWidth().background(Bar).padding(start = 8.dp, end = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    Modifier.weight(1f).horizontalScroll(rememberScrollState(), reverseScrolling = true),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val rootSite = LibraryDropSite(LibraryDropKind.Path, null)
+                    Box(Modifier.libraryDropSite(drag, rootSite)) {
+                        Control("阅读空间", active = dropTarget == rootSite, enabled = !busy) { navigate(null) }
+                    }
+                    trail.forEach { item ->
+                        InkIcon(R.drawable.inkask_ic_chevron_right, color = Muted, size = 12)
+                        val site = LibraryDropSite(LibraryDropKind.Path, item.id)
+                        Box(Modifier.widthIn(max = 220.dp).libraryDropSite(drag, site)) {
+                            Control(item.name, active = dropTarget == site, enabled = !busy) { navigate(item.id) }
+                        }
+                    }
+                }
+                Text(
+                    if (highlightedSelection.isEmpty()) "${order.size} 个项目" else "已选中 ${highlightedSelection.size} 项",
+                    Modifier.padding(start = 8.dp), color = Muted, fontSize = 12.sp, maxLines = 1,
+                )
+            }
+        }
+        Canvas(Modifier.matchParentSize()) {
+            val coordinates = drag.root?.takeIf { it.isAttached } ?: return@Canvas
+            val box = marquee?.translate(-coordinates.localToWindow(Offset.Zero)) ?: return@Canvas
+            drawRect(Green.copy(alpha = .12f), box.topLeft, box.size)
+            drawRect(Green.copy(alpha = .75f), box.topLeft, box.size, style = Stroke(1.dp.toPx()))
         }
         LibraryDragPreview(drag)
     }
@@ -553,41 +760,87 @@ private fun LibraryScreen(
 }
 
 @Composable
+private fun LibrarySearch(query: String, search: (String) -> Unit) {
+    OutlinedTextField(
+        query, search, singleLine = true, textStyle = LocalTextStyle.current.copy(fontSize = 13.sp),
+        placeholder = { Text("搜索资料与文件夹", fontSize = 13.sp, maxLines = 1) },
+        leadingIcon = { InkIcon(R.drawable.inkask_ic_search, color = Muted) },
+        shape = ControlShape, modifier = Modifier.width(204.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = Paper, unfocusedContainerColor = Paper,
+            unfocusedBorderColor = Line,
+        ),
+    )
+}
+
+private val LibraryDetailWidth = 112.dp
+
+@Composable
 private fun LibraryTile(
-    name: String, details: String, folder: Boolean, grid: Boolean, selected: Boolean, cut: Boolean,
-    dragging: Boolean, draggingTo: Boolean, enabled: Boolean, modifier: Modifier = Modifier,
-    body: Modifier, selectionControl: Modifier, onClick: () -> Unit, onSelect: () -> Unit,
+    name: String, details: String, folder: Boolean, grid: Boolean, striped: Boolean, selected: Boolean, cut: Boolean,
+    dragging: Boolean, draggingTo: Boolean, enabled: Boolean,
+    body: Modifier, icon: Modifier, onClick: () -> Unit, onSelect: () -> Unit,
 ) {
-    val fill = if (selected || draggingTo) PaleGreen else Paper
-    Box(modifier.fillMaxWidth()) {
-        Surface(
-            border = BorderStroke(if (draggingTo) 2.dp else 1.dp, if (selected || draggingTo) Green else Line),
-            color = fill, shape = ReaderCardShape,
-            modifier = body.fillMaxWidth().alpha(if (dragging || cut) .55f else 1f)
-                .semantics { this.selected = selected }.clickable(enabled = enabled, onClick = onClick),
-        ) {
-            if (grid) {
-                Column(Modifier.height(138.dp).fillMaxWidth().padding(12.dp)) {
-                    Box(Modifier.height(48.dp), contentAlignment = Alignment.CenterStart) {
-                        LibraryItemIcon(folder, if (folder) 46 else 42)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(name, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        color = Ink, fontSize = 14.sp, lineHeight = 18.sp)
-                    Spacer(Modifier.weight(1f))
-                    Text(details, color = Muted, fontSize = 12.sp)
+    val highlighted = selected || draggingTo
+    val item = body.semantics {
+        this.selected = selected
+        if (enabled) {
+            customActions = listOf(CustomAccessibilityAction(if (selected) "取消选择" else "选择") {
+                onSelect()
+                true
+            })
+        }
+    }.clickable(
+        interactionSource = remember { MutableInteractionSource() }, indication = null,
+        enabled = enabled, onClick = onClick,
+    )
+    val opacity = when {
+        dragging -> 0f
+        cut -> .48f
+        else -> 1f
+    }
+    if (grid) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 114.dp), contentAlignment = Alignment.TopCenter) {
+            Column(
+                item.widthIn(min = 76.dp, max = 144.dp).alpha(opacity).padding(horizontal = 4.dp, vertical = 3.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                val selectionShape = RoundedCornerShape(8.dp)
+                Box(
+                    Modifier.size(66.dp).background(if (highlighted) PaleGreen else Color.Transparent, selectionShape)
+                        .then(if (draggingTo) Modifier.border(1.dp, Green, selectionShape) else Modifier),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    LibraryItemIcon(folder, libraryItemIconSize(folder, grid), icon)
                 }
-            } else {
-                Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 54.dp).heightIn(min = 58.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    LibraryItemIcon(folder, 25)
-                    Text(name, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(details, color = Muted, fontSize = 12.sp)
-                }
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    name, Modifier.background(if (selected) Green else Color.Transparent, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                    color = if (selected) Paper else Ink, textAlign = TextAlign.Center,
+                    fontSize = 13.sp, lineHeight = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
             }
         }
-        Checkbox(checked = selected, onCheckedChange = { onSelect() }, enabled = enabled,
-            modifier = selectionControl.align(if (grid) Alignment.TopEnd else Alignment.CenterEnd)
-                .semantics { contentDescription = "选择 $name" })
+    } else {
+        val fill = when {
+            highlighted && !dragging -> PaleGreen
+            striped -> Bar
+            else -> Paper
+        }
+        Row(
+            item.fillMaxWidth().background(fill)
+                .then(if (draggingTo) Modifier.border(1.dp, Green) else Modifier)
+                .heightIn(min = 44.dp).padding(start = 18.dp, end = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LibraryItemIcon(folder, libraryItemIconSize(folder, grid), icon.alpha(opacity))
+            Text(
+                name, Modifier.weight(1f).padding(start = 10.dp, end = 8.dp).alpha(opacity),
+                color = Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            Text(details, Modifier.width(LibraryDetailWidth).alpha(opacity),
+                color = Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }

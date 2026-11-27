@@ -1,5 +1,8 @@
 package app.inkask.tablet
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -21,7 +24,7 @@ import org.json.JSONObject
 @Composable
 internal fun ReaderButton(
     description: String, icon: Int? = null, label: String? = null, state: String? = null,
-    enabled: Boolean = true, active: Boolean = false, action: () -> Unit,
+    enabled: Boolean = true, active: Boolean = false, modifier: Modifier = Modifier, action: () -> Unit,
 ) {
     FilledIconButton(
         onClick = action,
@@ -33,7 +36,7 @@ internal fun ReaderButton(
             disabledContainerColor = Bar,
             disabledContentColor = Muted.copy(alpha = .42f),
         ),
-        modifier = Modifier.size(44.dp).semantics {
+        modifier = modifier.size(44.dp).semantics {
             contentDescription = description
             if (state != null) stateDescription = state
         },
@@ -44,6 +47,45 @@ internal fun ReaderButton(
             fontSize = if (label.length > 3) 10.sp else 13.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+@Composable
+internal fun ReaderSelectionModeButton(mode: PdfSelectionMode, vertical: Boolean, onModeChange: (PdfSelectionMode) -> Unit) {
+    val textMode = mode == PdfSelectionMode.Text
+    FilledIconButton(
+        onClick = { onModeChange(if (textMode) PdfSelectionMode.Region else PdfSelectionMode.Text) },
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(containerColor = Bar, contentColor = Ink),
+        modifier = Modifier.size(width = if (vertical) 44.dp else 72.dp, height = 44.dp)
+            .border(1.dp, Line, CircleShape)
+            .semantics {
+                contentDescription = "选取方式"
+                stateDescription = if (textMode) "文字选取" else "区域框选"
+            },
+    ) {
+        Crossfade(targetState = mode, animationSpec = tween(120), label = "Selection mode") { displayed ->
+            val text = displayed == PdfSelectionMode.Text
+            val content: @Composable () -> Unit = {
+                Icon(
+                    painterResource(if (text) R.drawable.inkask_ic_text_cursor else R.drawable.inkask_ic_scan),
+                    contentDescription = null, modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.size(if (vertical) 1.dp else 5.dp))
+                Text(
+                    if (text) "文字" else "区域", fontSize = if (vertical) 10.sp else 12.sp,
+                    lineHeight = if (vertical) 13.sp else 16.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (vertical) Column(
+                Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) { content() } else Row(
+                Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) { content() }
+        }
     }
 }
 

@@ -89,19 +89,19 @@ class ReaderIslandGlideTest {
             motion = next
         }
 
-        assertTrue("Expected at least three direction reversals, observed $bounces", bounces >= 3)
+        assertTrue("Expected at least five direction reversals, observed $bounces", bounces >= 5)
         assertTrue(motion.velocity.getDistance() < 38f)
     }
 
     @Test fun twoRecentSamplesStillGiveAReleaseVelocity() {
-        val velocity = ReaderIslandVelocity(100L, Offset(100f, 0f))
+        val velocity = DragReleaseVelocity(100L, Offset(100f, 0f))
         velocity.sample(135L, Offset(275f, 0f))
 
         assertEquals(Offset(5000f, 0f), velocity.release(140L, Offset(300f, 0f)))
     }
 
     @Test fun waitingBeforeLiftingStopsTheMomentum() {
-        val velocity = ReaderIslandVelocity(0L, Offset.Zero)
+        val velocity = DragReleaseVelocity(0L, Offset.Zero)
         velocity.sample(35L, Offset(175f, 0f))
         velocity.sample(80L, Offset(175f, 0f))
 

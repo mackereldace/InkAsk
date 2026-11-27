@@ -107,7 +107,10 @@ internal class ReadingModel(context: Context) {
 
     fun defaultTemplate(task: String): JSONObject = defaults.first { it.getString("task") == task }
 
-    fun stream(profile: ModelProfile, prompt: String, history: List<Turn>, images: List<InputImage>, probe: Boolean = false): Flow<String> = callbackFlow {
+    fun stream(
+        profile: ModelProfile, prompt: String, history: List<Turn>, images: List<InputImage>,
+        probe: Boolean = false, readingInstructions: Boolean = true,
+    ): Flow<String> = callbackFlow {
         val path = when (profile.protocol) {
             "responses" -> "/responses"
             "anthropic" -> "/messages"
@@ -116,7 +119,7 @@ internal class ReadingModel(context: Context) {
         require(profile.images || (images.isEmpty() && history.none { it.images.isNotEmpty() })) {
             "当前模型未开启图片输入支持。"
         }
-        val instruction = if (probe || prompt.startsWith(systemPrompt)) prompt else "$systemPrompt\n\n$prompt"
+        val instruction = if (probe || !readingInstructions || prompt.startsWith(systemPrompt)) prompt else "$systemPrompt\n\n$prompt"
         val body = JSONObject().put("model", profile.model).put("stream", true)
         val turns = history + Turn("user", instruction, images)
         val messages = JSONArray(turns.map { turn ->

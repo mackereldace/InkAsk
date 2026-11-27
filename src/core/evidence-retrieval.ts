@@ -2,6 +2,7 @@ import type { Anchor, Note, Project, Rect } from "../types";
 import type { EvidenceBlock } from "./evidence-types";
 import { anchorEvidenceBlocks, pageEvidenceBlocks } from "./evidence-blocks";
 import { anchorFragments, anchorPage } from "./pdf-anchor";
+import { PDF_STRUCTURE_LABELS } from "./pdf-analysis";
 
 const MAX_EVIDENCE = 3;
 const common = new Set(["什么", "怎么", "如何", "这个", "那个", "一个", "这里", "后面", "使用", "条件", "问题", "请问", "解释", "中的", "的是", "什么是", "原文", "引用", "参考", "来源", "本次", "提供", "片段", "文档", "the", "and", "this", "that", "with", "from", "what", "how", "why", "is", "of", "to", "in", "on", "for", "as", "an"]);
@@ -101,8 +102,46 @@ export function deduplicateEvidence(blocks: readonly EvidenceBlock[]): EvidenceB
 const pools = new WeakMap<Project["pages"], readonly EvidenceBlock[]>();
 function pool(project: Project): readonly EvidenceBlock[] {
   let blocks = pools.get(project.pages);
-  if (!blocks) { blocks = project.pages.filter((page) => page.status === "ready" && page.text.trim()).flatMap((page) => [...pageEvidenceBlocks(page)]); pools.set(project.pages, blocks); }
+  if (!blocks) { blocks = project.pages.filter((page) => (page.status === "ready" && page.text.trim()) || page.analysis).flatMap((page) => [...pageEvidenceBlocks(page)]); pools.set(project.pages, blocks); }
   return blocks;
+}
+
+function namedStructures(blocks: readonly EvidenceBlock[], note: Note, question: string): EvidenceBlock[] {
+  const references = question.normalize("NFKC").matchAll(/(?:(定理|命题|引理|推论|定义|例题|公式|式)\s*[:：]?[ (]*(\d+(?:\s*\.\s*\d+)*))|(\d+(?:\s*\.\s*\d+)+)/g);
+  const found: EvidenceBlock[] = [];
+  for (const [, label, labelled, bare] of references) {
+    if (label === "式" || label === "公式") continue;
+    const number = (labelled ?? bare).replace(/\s+/g, "");
+    const matching = blocks.filter(block => block.structure?.number === number);
+    const statements = matching.filter(block => block.structure!.kind !== "proof" && block.structure!.kind !== "remark" &&
+      !block.structure!.continuesFromPrevious && (!label || PDF_STRUCTURE_LABELS[block.structure!.kind] === label));
+    const statement = statements.sort((a, b) => Math.abs(a.page - note.anchor.page) - Math.abs(b.page - note.anchor.page))[0];
+    if (!statement) continue;
+    found.push(statement);
+    let part = statement;
+    while (part.structure?.continuesOnNext && found.length < MAX_EVIDENCE) {
+      const next = matching.find(block => block.page === part.page + 1 &&
+        block.structure?.continuesFromPrevious && block.structure.kind === part.structure?.kind);
+      if (!next) break;
+      part = next;
+      found.push(next);
+    }
+  }
+  if (/证明|推导|why|proof|derive/i.test(question)) {
+    for (const statement of [...found]) {
+      const proof = blocks.find(block => block.structure?.kind === "proof" &&
+        block.structure.number === statement.structure?.number && block.page >= statement.page &&
+        !block.structure.continuesFromPrevious && (block.page !== statement.page || block.start >= statement.end));
+      if (!proof) continue;
+      found.push(proof);
+      if (proof.structure?.continuesOnNext) {
+        const continuation = blocks.find(block => block.page === proof.page + 1 && block.structure?.kind === "proof" &&
+          block.structure.number === proof.structure?.number && block.structure.continuesFromPrevious);
+        if (continuation) found.push(continuation);
+      }
+    }
+  }
+  return found;
 }
 
 export function selectEvidence(project: Project, note: Note, question: string): EvidenceBlock[] {
@@ -114,8 +153,11 @@ export function selectEvidence(project: Project, note: Note, question: string): 
     const next = deduplicateEvidence([...selected, block]);
     if (next.length <= MAX_EVIDENCE) { selected.length = 0; selected.push(...next); }
   };
+  const named = namedStructures(blocks, note, question);
+  for (const block of named) add(block);
+
   const local = anchorFragments(note.anchor).flatMap(fragment => {
-    const page = project.pages.find(page => page.page === fragment.page && page.status === "ready");
+    const page = project.pages.find(page => page.page === fragment.page && (page.status === "ready" || page.analysis));
     return page ? anchorEvidenceBlocks(page, fragment) : [];
   }).filter((block) => !["heading", "caption", "marginal"].includes(block.role)).sort((a, b) => (a.end - a.start) - (b.end - b.start) || a.page - b.page || a.start - b.start);
   for (const block of local.slice(0, 2)) add(block);
@@ -125,6 +167,7 @@ export function selectEvidence(project: Project, note: Note, question: string): 
     const companion = blocks.find((block) => block.page === primary.page && block.section === primary.section && complementary.includes(block.role));
     if (companion) add(companion);
   }
+  if (selected.length >= MAX_EVIDENCE) return selected;
   const ranked = rankEvidenceBlocks(blocks, query);
   const threshold = Math.max(1.1, (ranked[0]?.score ?? 0) * .28);
   for (const { block, score } of ranked) {

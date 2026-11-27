@@ -16,6 +16,13 @@ internal class SharedReadingCore(context: Context) {
         JSONObject(run("context", JSONObject().put("project", project).put("note", note)
             .put("question", question).put("template", template)))
 
+    fun pdfAnalysisPrompt(pages: List<JSONObject>, target: Int): String =
+        run("pdfAnalysis", JSONObject().put("pages", JSONArray(pages)).put("targets", JSONArray(listOf(target))))
+
+    fun parsePdfAnalysis(pages: List<JSONObject>, target: Int, response: String): JSONObject =
+        JSONArray(run("pdfAnalysisResult", JSONObject().put("pages", JSONArray(pages))
+            .put("targets", JSONArray(listOf(target))).put("response", response))).getJSONObject(0).getJSONObject("analysis")
+
     fun branch(project: JSONObject, parentId: String, messageId: String, anchor: JSONObject,
                template: JSONObject, id: String, createdAt: Long): JSONObject =
         JSONObject(run("branch", JSONObject().put("project", project).put("parentId", parentId)

@@ -4,7 +4,6 @@ import android.graphics.RectF
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -15,7 +14,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -36,14 +34,15 @@ internal data class PageNote(val number: Int, val note: JSONObject, val anchor: 
 
 @Composable
 internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
-                         notes: List<PageNote>, located: PdfRange?, region: Boolean,
+                         notes: List<PageNote>, located: PdfRange?,
                          layouts: MutableMap<Int, PdfPageLayout>, handles: List<PdfHandle>,
                          horizontal: Boolean, across: Float,
-                         onSelect: (PdfRange, Offset?) -> Unit, onNote: (String) -> Unit, report: (String) -> Unit) {
-    val nativeSize by produceState<PageSize?>(null, pdf, page) {
-        value = runCatching { withContext(Dispatchers.IO) { pdf.size(page) } }.getOrNull()
+                         onNote: (String) -> Unit, report: (String) -> Unit) {
+    val pageInfo by produceState<PdfPageInfo?>(null, pdf, page) {
+        value = runCatching { withContext(Dispatchers.IO) { pdf.pageInfo(page) } }.getOrNull()
     }
-    val pageSize = nativeSize ?: PageSize(595, 842)
+    val pageSize = pageInfo?.size ?: PageSize(595, 842)
+    val links = pageInfo?.links.orEmpty()
     val rotated = pageSize.rotated(rotation)
     val height = width * (rotated.height.toFloat() / rotated.width)
     val pixels = with(LocalDensity.current) { width.roundToPx() }
@@ -55,12 +54,10 @@ internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
         catch (error: kotlinx.coroutines.CancellationException) { throw error }
         catch (_: Exception) { report("第 $page 页无法渲染。") }
     }
-    val deliver by rememberUpdatedState(onSelect)
-    var drawing by remember { mutableStateOf<Pair<Offset, Offset>?>(null) }
     var layout by remember { mutableStateOf<LayoutCoordinates?>(null) }
     SideEffect {
         val coordinates = layout
-        if (coordinates != null && nativeSize != null) layouts[page] = PdfPageLayout(coordinates, pageSize, rotation)
+        if (coordinates != null && pageInfo != null) layouts[page] = PdfPageLayout(coordinates, pageSize, rotation, links)
     }
     DisposableEffect(layouts, page) {
         onDispose {
@@ -74,28 +71,10 @@ internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
     }.requiredSize(width, height).background(Color.White)
         .onGloballyPositioned {
             layout = it
-            layouts[page] = PdfPageLayout(it, pageSize, rotation)
+            layouts[page] = PdfPageLayout(it, pageSize, rotation, links)
         }.semantics { contentDescription = "PDF 第 $page 页" }) {
         pageImage?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
-        val regionGesture = if (!region) Modifier else Modifier.pointerInput(page, pageSize, rotation) {
-            fun complete() {
-                val (first, last) = drawing ?: return
-                drawing = null
-                val geometry = layouts[page]?.takeIf { it.coordinates.isAttached } ?: return
-                val a = geometry.pagePoint(first)
-                val b = geometry.pagePoint(last)
-                val box = RectF(minOf(a.x, b.x).toFloat(), minOf(a.y, b.y).toFloat(),
-                    maxOf(a.x, b.x).toFloat(), maxOf(a.y, b.y).toFloat())
-                if (box.width() > 1 && box.height() > 1) {
-                    deliver(PdfRange(page, "", listOf(box)), geometry.coordinates.localToWindow(last))
-                }
-            }
-            detectDragGestures(onDragStart = { drawing = it to it }, onDragCancel = { drawing = null }, onDragEnd = ::complete) { change, _ ->
-                change.consume()
-                drawing?.let { drawing = it.first to change.position }
-            }
-        }
-        Canvas(Modifier.fillMaxSize().then(regionGesture)) {
+        Canvas(Modifier.fillMaxSize()) {
             val matrix = rotationMatrix(pageSize, rotation)
             matrix.postScale(size.width / rotated.width, size.height / rotated.height)
             fun mark(box: RectF, color: Color) {
@@ -112,9 +91,6 @@ internal fun PdfPageView(pdf: NativePdf, page: Int, width: Dp, rotation: Int,
                 val point = Offset(mapped[0], mapped[1])
                 drawCircle(Color.White, 8.dp.toPx(), point)
                 drawCircle(Green, 6.dp.toPx(), point)
-            }
-            drawing?.takeIf { region }?.let { (a, b) ->
-                drawRect(Color(0x709EBD6D), Offset(minOf(a.x, b.x), minOf(a.y, b.y)), Size(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)))
             }
         }
         notes.forEach { item ->

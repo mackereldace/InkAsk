@@ -25,6 +25,9 @@ internal data class PageSize(val width: Int, val height: Int) {
     fun rotated(rotation: Int) = if (rotation % 180 == 0) this else PageSize(height, width)
 }
 
+internal data class PdfPageLink(val targetPage: Int, val bounds: List<RectF>)
+internal data class PdfPageInfo(val size: PageSize, val links: List<PdfPageLink>)
+
 internal data class PdfRange(val page: Int, val quote: String, val boxes: List<RectF>) {
     fun anchor(size: PageSize): JSONObject = JSONObject().put("page", page).put("quote", quote)
         .put("rects", JSONArray(boxes.map { it.pdfRect(size) }))
@@ -43,6 +46,26 @@ internal class NativePdf(private val file: File) : Closeable {
 
     @Synchronized
     fun size(page: Int): PageSize = renderer.openPage(page - 1).use { PageSize(it.width, it.height) }
+
+    @Synchronized
+    fun pageInfo(page: Int): PdfPageInfo = renderer.openPage(page - 1).use { source ->
+        val size = PageSize(source.width, source.height)
+        val links = try {
+            val targets = when {
+                Build.VERSION.SDK_INT >= 35 -> source.gotoLinks
+                canSelectText -> openCompatibleRenderer().openPage(page - 1).use { it.gotoLinks }
+                else -> emptyList()
+            }
+            targets.mapNotNull { link ->
+                val index = link.destination.pageNumber
+                val bounds = link.bounds.filterNot { it.isEmpty }
+                if (index in 0 until pageCount && bounds.isNotEmpty()) PdfPageLink(index + 1, bounds) else null
+            }
+        } catch (_: RuntimeException) {
+            emptyList()
+        }
+        PdfPageInfo(size, links)
+    }
 
     @Synchronized
     fun render(page: Int, pixelWidth: Int, rotation: Int): Bitmap =

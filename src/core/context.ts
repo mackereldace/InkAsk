@@ -14,6 +14,7 @@ import {
   type TemplateVariables,
 } from "./templates";
 import { selectEvidence } from "./evidence-retrieval";
+import { applicablePdfAnalysis } from "./pdf-analysis";
 import { anchorFragments } from "./pdf-anchor";
 
 const DEFAULT_BUDGET = 12_000;
@@ -40,7 +41,9 @@ function pageCoverage(project: Project): string {
 
   for (let pageNo = 1; pageNo <= total; pageNo += 1) {
     const page = pages.get(pageNo);
-    if (!page || page.status === "pending") {
+    if (page?.analysis && applicablePdfAnalysis(page)?.transcript.length) {
+      ready += 1;
+    } else if (!page || page.status === "pending") {
       pending += 1;
     } else if (page.status === "error") {
       errors += 1;

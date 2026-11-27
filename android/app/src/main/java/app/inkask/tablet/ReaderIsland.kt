@@ -36,11 +36,6 @@ private val IslandSnapDistance = 52.dp
 private val IslandEdgeHysteresis = 8.dp
 private val IslandMargin = 10.dp
 private val IslandHandleSize = 54.dp
-private val IslandFlingMinSpeed = 360.dp
-private val IslandFlingMaxSpeed = 5200.dp
-private val IslandFlingBounceSpeed = 1000.dp
-private val IslandFlingEasterEggSpeed = 2300.dp
-private val IslandFlingStopSpeed = 38.dp
 
 internal enum class ReaderIslandEdge {
     Free, Top, Bottom, Left, Right;
@@ -123,11 +118,13 @@ internal data class ReaderIslandPosition(
 
 @Composable
 internal fun ReaderIsland(
-    position: ReaderIslandPosition, onPlace: (ReaderIslandPosition) -> Unit, content: @Composable () -> Unit,
+    position: ReaderIslandPosition, onPlace: (ReaderIslandPosition) -> Unit,
+    pageScrubbing: () -> Boolean, content: @Composable () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val place by rememberUpdatedState(onPlace)
     val previousVertical by rememberUpdatedState(position.vertical)
+    val scrubbing by rememberUpdatedState(pageScrubbing)
     var viewport by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var island by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var dragging by remember { mutableStateOf<ReaderIslandPosition?>(null) }
@@ -211,10 +208,11 @@ internal fun ReaderIsland(
                         }
 
                         fun pointerPosition(local: Offset) = root.windowToLocal(handle.localToWindow(local))
-                        val velocity = ReaderIslandVelocity(down.uptimeMillis, pointerPosition(down.position))
+                        val velocity = DragReleaseVelocity(down.uptimeMillis, pointerPosition(down.position))
                         try {
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (scrubbing()) return@awaitEachGesture
                                 val change = event.changes.firstOrNull { it.id == down.id }
                                     ?: return@awaitEachGesture
                                 if (event.changes.any { it.id != down.id && it.pressed }) return@awaitEachGesture

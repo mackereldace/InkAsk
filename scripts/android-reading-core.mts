@@ -2,6 +2,7 @@ import { exportMarkdown } from "../src/core/archive.js";
 import { createBranch } from "../src/core/branches.js";
 import { prepareCitationMarkdown } from "../src/core/citation-markdown.js";
 import { buildContext } from "../src/core/context.js";
+import { parsePdfAnalysis, pdfAnalysisPrompt } from "../src/core/pdf-analysis.js";
 import { canMoveFolder, topLevelMoveItems, type LibraryItemRef } from "../src/core/library.js";
 import { planNoteExport } from "../src/core/note-export.js";
 import { sourceForAnchor } from "../src/core/source-location.js";
@@ -12,6 +13,16 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { Anchor, AnswerAnchor, PageText, Project, PromptTemplate, Source } from "../src/types.js";
 import type { WorkspaceFolder } from "../src/core/storage.js";
+
+export function pdfAnalysis(input: string): string {
+  const { pages, targets } = JSON.parse(input) as { pages: PageText[]; targets: number[] };
+  return pdfAnalysisPrompt(pages, targets);
+}
+
+export function pdfAnalysisResult(input: string): string {
+  const { pages, targets, response } = JSON.parse(input) as { pages: PageText[]; targets: number[]; response: string };
+  return JSON.stringify(parsePdfAnalysis(response, pages, targets));
+}
 
 // Android supplies saved JSON metadata. Rendering and PDF/image I/O stay native.
 export function context(input: string): string {

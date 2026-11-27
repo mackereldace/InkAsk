@@ -2,6 +2,7 @@ package app.inkask.tablet
 
 import android.graphics.Matrix
 import android.graphics.Point
+import android.graphics.RectF
 import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.core.animateDecay
@@ -68,6 +69,7 @@ internal fun JSONObject.pdfSelection(size: (Int) -> PageSize): PdfSelection =
 
 private data class PdfEndpoint(val page: Int, val point: Point)
 internal data class PdfHandle(val page: Int, val point: Offset)
+internal enum class PdfSelectionMode { Text, Region }
 
 internal fun PdfSelection.handles(): List<PdfHandle> {
     val first = fragments.first()
@@ -78,7 +80,13 @@ internal fun PdfSelection.handles(): List<PdfHandle> {
     )
 }
 
-internal data class PdfPageLayout(val coordinates: LayoutCoordinates, val size: PageSize, val rotation: Int) {
+internal data class PdfPageLayout(
+    val coordinates: LayoutCoordinates, val size: PageSize, val rotation: Int, val links: List<PdfPageLink>,
+) {
+    fun linkAt(point: Point): PdfPageLink? = links.firstOrNull { link ->
+        link.bounds.any { it.contains(point.x.toFloat(), point.y.toFloat()) }
+    }
+
     fun localOffset(point: Offset): Offset {
         val rotated = size.rotated(rotation)
         val mapped = floatArrayOf(point.x, point.y)
@@ -107,13 +115,13 @@ private class PdfViewport {
 }
 
 @Composable
-internal fun Modifier.pdfTextSelection(
-    pdf: NativePdf, scroll: LazyListState, horizontal: Boolean, enabled: Boolean,
+internal fun Modifier.pdfSelectionGestures(
+    pdf: NativePdf, scroll: LazyListState, horizontal: Boolean, mode: PdfSelectionMode,
     layouts: Map<Int, PdfPageLayout>, pages: Map<Int, JSONObject>,
     handles: List<PdfHandle>,
     onZoomStart: (Offset) -> Unit, onZoom: (Float, Offset) -> Unit,
     canPanAcross: () -> Boolean, onPanAcross: (Float) -> Float, onDoubleTap: (Offset) -> Unit,
-    onPreview: (PdfSelection?) -> Unit, onSelect: (PdfSelection, Offset) -> Unit, report: (String) -> Unit,
+    onLink: (Int) -> Unit, onPreview: (PdfSelection?) -> Unit, onSelect: (PdfSelection, Offset) -> Unit, report: (String) -> Unit,
 ): Modifier {
     val viewport = remember(scroll) { PdfViewport() }
     val pageRecords by rememberUpdatedState(pages)
@@ -126,15 +134,17 @@ internal fun Modifier.pdfTextSelection(
     val canPan by rememberUpdatedState(canPanAcross)
     val panAcross by rememberUpdatedState(onPanAcross)
     val doubleTap by rememberUpdatedState(onDoubleTap)
+    val followLink by rememberUpdatedState(onLink)
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val decay = rememberSplineBasedDecay<Offset>()
     val mainDirection = if (horizontal && LocalLayoutDirection.current == LayoutDirection.Rtl) 1f else -1f
     return onGloballyPositioned { viewport.coordinates = it }
-        .pointerInput(pdf, scroll, horizontal, enabled, mainDirection, decay) {
+        .pointerInput(pdf, scroll, horizontal, mode, mainDirection, decay) {
+            val textMode = mode == PdfSelectionMode.Text
+            fun window(position: Offset) = viewport.coordinates?.takeIf { it.isAttached }?.localToWindow(position)
             fun endpoint(position: Offset, insidePage: Boolean = false): PdfEndpoint? {
-                val view = viewport.coordinates?.takeIf { it.isAttached } ?: return null
-                val window = view.localToWindow(position)
+                val window = window(position) ?: return null
                 var nearest: PdfEndpoint? = null
                 var nearestDistance = Float.POSITIVE_INFINITY
                 for (item in scroll.layoutInfo.visibleItemsInfo) {
@@ -157,6 +167,18 @@ internal fun Modifier.pdfTextSelection(
                 }
                 return nearest
             }
+            fun regionSelection(start: PdfEndpoint, position: Offset): PdfSelection? {
+                val window = window(position) ?: return null
+                val layout = layouts[start.page]?.takeIf { it.coordinates.isAttached } ?: return null
+                val first = start.point
+                val last = layout.pagePoint(layout.coordinates.windowToLocal(window))
+                val box = RectF(
+                    minOf(first.x, last.x).toFloat(), minOf(first.y, last.y).toFloat(),
+                    maxOf(first.x, last.x).toFloat(), maxOf(first.y, last.y).toFloat(),
+                )
+                if (box.width() <= 1 || box.height() <= 1) return null
+                return PdfSelection(listOf(PdfRange(start.page, "", listOf(box))))
+            }
 
             var resolving: Job? = null
             var fling: Job? = null
@@ -164,7 +186,6 @@ internal fun Modifier.pdfTextSelection(
             var lastTap = Offset.Unspecified
             val edge = 52.dp.toPx()
             val maxScroll = 900.dp.toPx()
-            fun window(position: Offset) = viewport.coordinates?.takeIf { it.isAttached }?.localToWindow(position)
             fun handleStart(position: Offset): PdfEndpoint? {
                 val finger = window(position) ?: return null
                 if (markers.size != 2) return null
@@ -206,8 +227,8 @@ internal fun Modifier.pdfTextSelection(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     fling?.cancel()
-                    val fixed = if (enabled) handleStart(down.position) else null
-                    val touched = if (enabled) endpoint(down.position, insidePage = true) else null
+                    val fixed = if (textMode) handleStart(down.position) else null
+                    val touched = endpoint(down.position, insidePage = true)
                     var event: PointerEvent = currentEvent
                     var dragStart: Offset? = null
                     if (fixed == null) {
@@ -219,7 +240,7 @@ internal fun Modifier.pdfTextSelection(
                                 val delta = change.position - down.position
                                 val distance = delta.getDistance()
                                 if (distance > viewConfiguration.touchSlop) {
-                                    if (enabled && canPan()) {
+                                    if (canPan()) {
                                         dragStart = down.position + delta * (viewConfiguration.touchSlop / distance)
                                     }
                                     break
@@ -230,8 +251,22 @@ internal fun Modifier.pdfTextSelection(
                         if (didEnd || touched == null) {
                             if (event.pointerCount() == 0) {
                                 val up = event.changes.firstOrNull { it.id == down.id }
+                                val link = touched?.let { layouts[it.page]?.linkAt(it.point) }
+                                if (link != null && up != null && up.changedToUpIgnoreConsumed() &&
+                                    (up.position - down.position).getDistance() <= viewConfiguration.touchSlop) {
+                                    // Let a note button on top of the page claim the tap first.
+                                    awaitPointerEvent(PointerEventPass.Final)
+                                    if (!down.isConsumed && !up.isConsumed) {
+                                        up.consume()
+                                        resolving?.cancel()
+                                        followLink(link.targetPage)
+                                    }
+                                    lastTapTime = 0L
+                                    lastTap = Offset.Unspecified
+                                    return@awaitEachGesture
+                                }
                                 val now = up?.uptimeMillis ?: 0L
-                                if (enabled && touched != null && lastTap.isSpecified && now - lastTapTime <= viewConfiguration.doubleTapTimeoutMillis &&
+                                if (touched != null && lastTap.isSpecified && now - lastTapTime <= viewConfiguration.doubleTapTimeoutMillis &&
                                     (down.position - lastTap).getDistance() < 40.dp.toPx()) {
                                     up?.consume()
                                     window(down.position)?.let(doubleTap)
@@ -285,8 +320,8 @@ internal fun Modifier.pdfTextSelection(
                     resolving?.cancel()
                     val records = pageRecords
                     val wholePages = mutableMapOf<Int, PdfRange?>()
-                    val endpoints = Channel<PdfEndpoint>(Channel.CONFLATED)
-                    val preview = scope.launch {
+                    val endpoints = if (textMode) Channel<PdfEndpoint>(Channel.CONFLATED) else null
+                    val preview = if (endpoints != null) scope.launch {
                         for (end in endpoints) {
                             val result = try {
                                 withContext(Dispatchers.IO) { pdf.selectPages(start, end, records, wholePages) }
@@ -294,9 +329,9 @@ internal fun Modifier.pdfTextSelection(
                             catch (_: Exception) { null }
                             paint(result)
                         }
-                    }
-                    endpoints.trySend(if (fixed == null) start else endpoint(down.position) ?: start)
-                    val autoScroll = scope.launch {
+                    } else null
+                    endpoints?.trySend(if (fixed == null) start else endpoint(down.position) ?: start)
+                    val autoScroll = if (endpoints != null) scope.launch {
                         var previous = withFrameNanos { it }
                         var lastPreviewAt = previous
                         var lastEndpoint = start
@@ -319,7 +354,7 @@ internal fun Modifier.pdfTextSelection(
                                 }
                             }
                         }
-                    }
+                    } else null
                     try {
                         // A long press has claimed the gesture. Consume moves before the lazy list sees them.
                         while (true) {
@@ -329,22 +364,27 @@ internal fun Modifier.pdfTextSelection(
                             pointer = change.position
                             change.consume()
                             if (change.changedToUpIgnoreConsumed()) break
+                            if (!textMode) paint(regionSelection(start, pointer))
                         }
                     } finally {
-                        autoScroll.cancel()
-                        endpoints.cancel()
-                        preview.cancel()
+                        autoScroll?.cancel()
+                        endpoints?.cancel()
+                        preview?.cancel()
                         paint(null)
                     }
                     if (event.pointerCount() >= 2) {
                         followReaderPinch(event, ::startZoom, ::transform)
                         return@awaitEachGesture
                     }
-                    val end = endpoint(pointer) ?: return@awaitEachGesture
                     val position = window(pointer) ?: return@awaitEachGesture
+                    if (!textMode) {
+                        regionSelection(start, pointer)?.let { deliver(it, position) }
+                        return@awaitEachGesture
+                    }
+                    val end = endpoint(pointer) ?: return@awaitEachGesture
                     resolving = scope.launch {
                         try {
-                            preview.join()
+                            preview?.join()
                             val selection = withContext(Dispatchers.IO) { pdf.selectPages(start, end, records, wholePages) }
                             if (selection != null) deliver(selection, position)
                         } catch (error: CancellationException) { throw error }

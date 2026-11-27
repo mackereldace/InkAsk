@@ -10,7 +10,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,14 +17,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
@@ -69,6 +69,7 @@ internal fun ReaderScreen(
     islandPosition: ReaderIslandPosition, onMoveIsland: (ReaderIslandPosition) -> Unit,
     openDrawer: () -> Unit, openLibrary: () -> Unit, openSettings: () -> Unit,
     export: (ExportKind) -> Unit, report: (String) -> Unit,
+    sidebar: @Composable (ReaderSidebarContent, (String) -> Unit) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val pdf = doc.pdf
@@ -83,9 +84,9 @@ internal fun ReaderScreen(
     var rotation by remember { mutableIntStateOf((initial.optInt("rotation", 0) % 360 + 360) % 360) }
     var scale by remember { mutableFloatStateOf(initial.optDouble("scale", 1.0).toFloat().coerceIn(.25f, 3f)) }
     var horizontal by remember { mutableStateOf(initial.optString("direction") == "horizontal") }
-    var region by remember { mutableStateOf(false) }
+    var selectionMode by remember { mutableStateOf(PdfSelectionMode.Text) }
     var selection by remember { mutableStateOf<QuestionSelection?>(null) }
-    var draggingText by remember { mutableStateOf<PdfSelection?>(null) }
+    var draggingSelection by remember { mutableStateOf<PdfSelection?>(null) }
     var located by remember { mutableStateOf<PdfRange?>(null) }
     var noteId by remember { mutableStateOf<String?>(null) }
     var messageId by remember { mutableStateOf<String?>(null) }
@@ -93,8 +94,15 @@ internal fun ReaderScreen(
     val replies = remember { mutableStateMapOf<String, String>() }
     val requests = remember { mutableStateMapOf<String, Job>() }
     var scanning by remember { mutableStateOf<Job?>(null) }
+    var analyzing by remember { mutableStateOf<Job?>(null) }
+    var analysisProgress by remember { mutableStateOf("") }
+    var analysisDialog by remember { mutableStateOf(false) }
+    var analysisResultPage by remember { mutableStateOf<Int?>(null) }
+    var analysisOutline by remember { mutableStateOf(false) }
     var preview by remember { mutableStateOf<SourcePreview?>(null) }
-    var pageDialog by remember { mutableStateOf(false) }
+    var pageJumpOpen by remember { mutableStateOf(false) }
+    var pageButtonBounds by remember { mutableStateOf<Rect?>(null) }
+    var scrubPage by remember { mutableStateOf<Int?>(null) }
     var pendingJump by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var paperPixels by remember { mutableFloatStateOf(0f) }
     val answerScales = remember { mutableStateMapOf<Pair<String, String?>, Float>() }
@@ -120,6 +128,14 @@ internal fun ReaderScreen(
     val answerPosition = focused?.let { it.getString("id") to focusedMessage }
     val timeline = generateSequence(focused) { note -> notes.firstOrNull { it.optString("id") == note.optString("parentId") } }
         .take(notes.size).toList().asReversed()
+    val sidebarNotes = remember(project) {
+        notes.filterNot { it.has("parentId") }.mapNotNull { note ->
+            val sourcePage = note.optJSONObject("anchor")?.optInt("page") ?: return@mapNotNull null
+            val id = note.optString("id")
+            if (id.isBlank() || sourcePage !in 1..pdf.pageCount) return@mapNotNull null
+            ReaderSidebarNote(id, note.optString("title").ifBlank { "便签" }, sourcePage)
+        }
+    }
     val pages = project.optJSONArray("pages").objects().associateBy { it.getInt("page") }
     var rawText by remember { mutableStateOf("") }
     val recognized = pages[page]?.takeIf { it.optString("source") == "ocr" && it.optString("status") == "ready" }
@@ -158,6 +174,9 @@ internal fun ReaderScreen(
                             val previous = stored[indexed.getInt("page")]
                             if (previous == null) records.put(indexed)
                             else if (previous.value.missingNativeTextBounds() && !indexed.missingNativeTextBounds()) {
+                                if (previous.value.optString("text") == indexed.optString("text")) {
+                                    previous.value.currentPdfAnalysis()?.let { indexed.put("analysis", it) }
+                                }
                                 records.put(previous.index, indexed)
                             }
                         }
@@ -186,6 +205,12 @@ internal fun ReaderScreen(
         activeBranch = focused?.optString("id")
         messageId = focused?.optString("parentMessageId")?.ifEmpty { null }
         noteId = focused?.optString("parentId")?.ifEmpty { null }
+    }
+    fun openNote(id: String) {
+        selection = null
+        activeBranch = null
+        messageId = null
+        noteId = id
     }
     BackHandler(enabled = !drawerOpen && (focused != null || selection != null)) {
         if (selection != null) selection = null else back()
@@ -418,6 +443,50 @@ internal fun ReaderScreen(
         }
     }
 
+    fun analyzeRange(range: IntRange, repeat: Boolean) {
+        val configured = profile?.takeIf { it.images } ?: return
+        if (analyzing != null || scanning != null) return
+        analysisDialog = false
+        report("")
+        analyzing = scope.launch {
+            var analyzed = 0
+            try {
+                val total = range.last - range.first + 1
+                for ((index, target) in range.withIndex()) {
+                    analysisProgress = "${index + 1}/$total"
+                    analyzePdfPage(doc, workspace, model, configured, target, repeat)?.let {
+                        publishProject(it)
+                        analyzed++
+                    }
+                }
+                if (page in range) analysisResultPage = page
+                else report("AI 解析完成，本次更新 $analyzed 页。")
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                report("已停止解析，本次已保存 $analyzed 页。")
+            } catch (error: Exception) {
+                report(error.localizedMessage ?: "PDF 解析失败。")
+            } finally {
+                analyzing = null
+                analysisProgress = ""
+            }
+        }
+    }
+
+    fun discardAnalysis(target: Int) {
+        analysisResultPage = null
+        scope.launch {
+            try {
+                publishProject(withContext(Dispatchers.IO) {
+                    workspace.update(doc.item.id) { current ->
+                        current.getJSONArray("pages").objects()
+                            .firstOrNull { it.getInt("page") == target }?.remove("analysis")
+                    }
+                })
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { report("无法移除本页解析。") }
+        }
+    }
+
     fun editNote(id: String, edit: (JSONObject) -> Unit) {
         scope.launch {
             try {
@@ -462,7 +531,7 @@ internal fun ReaderScreen(
         fun beginZoom(window: Offset) {
             zoomPivot = findZoomPivot(window)
             selection = null
-            draggingText = null
+            draggingSelection = null
         }
         fun verticalPageExtent(numbers: IntProgression, scaledWidth: Int, limit: Int): Float? {
             var extent = 0f
@@ -477,6 +546,20 @@ internal fun ReaderScreen(
                 if (extent >= limit) break
             }
             return extent
+        }
+        fun turnPage(target: Int) {
+            val viewport = if (horizontal) viewportSize.width else viewportSize.height
+            val pageWidth = with(density) { paperWidth.roundToPx() }
+            val remaining = if (horizontal) (pdf.pageCount - target + 1) * pageWidth.toFloat()
+                else verticalPageExtent(target..pdf.pageCount, pageWidth, viewport)
+            val position = pdfZoomPosition(
+                normalPadding.leading.toFloat(), viewport, normalPadding,
+                distanceToStart = null, distanceToEnd = remaining ?: 0f,
+            )
+            located = null
+            zoomPadding = position.padding
+            page = target
+            scroll.requestScrollToItem(target - 1, position.offset)
         }
         fun zoomTo(target: Float, window: Offset) {
             val next = target.coerceIn(.25f, 3f)
@@ -517,7 +600,7 @@ internal fun ReaderScreen(
         }
         fun fitPage(index: Int = scroll.firstVisibleItemIndex) {
             selection = null
-            draggingText = null
+            draggingSelection = null
             zoomPadding = null
             across = 0f
             scale = fitScale
@@ -530,7 +613,7 @@ internal fun ReaderScreen(
         }
         SideEffect { paperPixels = with(density) { paperWidth.toPx() } }
         val answerScale = answerPosition?.let { answerScales[it] } ?: 1f
-        Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().then(if (drawerOpen) Modifier.clearAndSetSemantics {} else Modifier)) {
             if (focused != null && answerPosition != null) {
                 val position = answerPosition
                 val focusedId = position.first
@@ -575,8 +658,8 @@ internal fun ReaderScreen(
                 }.groupBy { it.anchor.getInt("page") }
                 val handles = selection?.range?.takeIf { it.quote.isNotBlank() }?.handles().orEmpty()
                 val pager = Modifier.fillMaxWidth().weight(1f).clipToBounds()
-                    .onGloballyPositioned { viewportCoordinates = it }.onSizeChanged { viewportSize = it }.pdfTextSelection(
-                    pdf, scroll, horizontal, !region, pageLayouts, pages,
+                    .onGloballyPositioned { viewportCoordinates = it }.onSizeChanged { viewportSize = it }.pdfSelectionGestures(
+                    pdf, scroll, horizontal, selectionMode, pageLayouts, pages,
                     handles = handles,
                     onZoomStart = ::beginZoom,
                     onZoom = { factor, position -> zoomTo(scale * factor, position) },
@@ -592,16 +675,19 @@ internal fun ReaderScreen(
                         if (abs(scale - fitScale) < .05f) zoomTo(fitScale * 2, position)
                         else fitPage(zoomPivot?.item ?: scroll.firstVisibleItemIndex)
                     },
-                    onPreview = { draggingText = it; if (it != null) { selection = null; located = null } },
+                    onLink = { target ->
+                        selection = null
+                        turnPage(target)
+                    },
+                    onPreview = { draggingSelection = it; if (it != null) { selection = null; located = null } },
                     onSelect = { range, position -> selection = QuestionSelection(range, location = position); located = null },
                     report = report,
                 )
                 val item: @Composable (Int) -> Unit = { number ->
-                    val highlight = (draggingText ?: selection?.range)?.fragments?.firstOrNull { it.page == number } ?: located
-                    PdfPageView(pdf, number, paperWidth, rotation, noteAnchors[number].orEmpty(), highlight, region, pageLayouts,
+                    val highlight = (draggingSelection ?: selection?.range)?.fragments?.firstOrNull { it.page == number } ?: located
+                    PdfPageView(pdf, number, paperWidth, rotation, noteAnchors[number].orEmpty(), highlight, pageLayouts,
                         handles, horizontal, across,
-                        onSelect = { range, position -> selection = QuestionSelection(PdfSelection(listOf(range)), location = position); located = null },
-                        onNote = { id -> selection = null; messageId = null; noteId = id }, report = report)
+                        onNote = ::openNote, report = report)
                 }
                 val padding = zoomPadding ?: normalPadding
                 val leading = with(density) { padding.leading.toDp() }
@@ -615,19 +701,19 @@ internal fun ReaderScreen(
                 }
             }
         }
-        if (selection == null && draggingText == null && WindowInsets.ime.getBottom(density) == 0) {
-            ReaderIsland(islandPosition, onMoveIsland) {
+        if (selection == null && draggingSelection == null && WindowInsets.ime.getBottom(density) == 0) {
+            ReaderIsland(islandPosition, onMoveIsland, pageScrubbing = { scrubPage != null }) {
                 ReaderButton("显示资料侧栏", R.drawable.inkask_ic_panel_left, action = openDrawer)
                 if (answerPosition == null) {
-                    ReaderButton("页码", label = page.toString(), state = "第 $page 页，共 ${pdf.pageCount} 页", active = true) {
-                        pageDialog = true
-                    }
-                    if (width >= 320.dp) ReaderButton(
-                        if (region) "正在框选" else "框选区域", R.drawable.inkask_ic_highlighter, active = region,
-                    ) {
-                        region = !region
-                        selection = null
-                    }
+                    ReaderPageButton(
+                        scrubPage ?: page, pdf.pageCount, islandPosition.vertical,
+                        onPosition = { pageButtonBounds = it },
+                        onHold = { scrubPage = it },
+                        onScrub = { scrubPage = it; turnPage(it) },
+                        onRelease = { scrubPage = null },
+                        onClick = { pageJumpOpen = true },
+                    )
+                    ReaderSelectionModeButton(selectionMode, islandPosition.vertical) { selectionMode = it }
                 } else {
                     ReaderButton("返回上一层", R.drawable.inkask_ic_chevron_left, action = ::back)
                     ReaderButton("便签路径", R.drawable.inkask_ic_git_branch, state = "第 ${timeline.size} 层") {
@@ -635,7 +721,7 @@ internal fun ReaderScreen(
                     }
                 }
                 Box {
-                    ReaderButton("阅读工具", R.drawable.inkask_ic_ellipsis, active = scanning != null) { toolsMenu = true }
+                    ReaderButton("阅读工具", R.drawable.inkask_ic_ellipsis, active = scanning != null || analyzing != null) { toolsMenu = true }
                     DropdownMenu(
                         expanded = toolsMenu, onDismissRequest = { toolsMenu = false },
                         modifier = Modifier.widthIn(min = 218.dp, max = 300.dp).heightIn(max = 470.dp),
@@ -657,6 +743,12 @@ internal fun ReaderScreen(
                             }
                             ReaderButton(if (answerPosition == null) "放大" else "放大回答", R.drawable.inkask_ic_plus) { changeZoom(.1f) }
                         }
+                        if (analyzing != null) {
+                            DropdownMenuItem(text = { Text("AI 解析 $analysisProgress · 停止") }, onClick = {
+                                analyzing?.cancel()
+                                toolsMenu = false
+                            })
+                        }
                         if (answerPosition == null) {
                             DropdownMenuItem(text = { Text(if (horizontal) "切换为上下拼接" else "切换为左右拼接") }, onClick = {
                                 across = 0f; selection = null; horizontal = !horizontal; toolsMenu = false
@@ -664,14 +756,21 @@ internal fun ReaderScreen(
                             DropdownMenuItem(text = { Text("旋转页面") }, onClick = {
                                 across = 0f; selection = null; rotation = (rotation + 90) % 360; toolsMenu = false
                             })
-                            if (width < 320.dp) DropdownMenuItem(text = { Text(if (region) "退出框选" else "框选区域") }, onClick = {
-                                region = !region; selection = null; toolsMenu = false
-                            })
                             if (scanning != null) DropdownMenuItem(text = { Text("取消识别") }, onClick = {
                                 scanning?.cancel(); toolsMenu = false
-                            }) else if (rawText.isBlank() || recognized != null) DropdownMenuItem(
+                            }) else if (analyzing == null && (rawText.isBlank() || recognized != null)) DropdownMenuItem(
                                 text = { Text(if (recognized != null) "重新识别" else "识别本页") },
                                 onClick = { recognizePage(); toolsMenu = false },
+                            )
+                            if (analyzing == null) DropdownMenuItem(
+                                text = { Text("AI 解析 PDF…") }, enabled = scanning == null,
+                                onClick = { analysisDialog = true; toolsMenu = false },
+                            )
+                            if (pages[page]?.currentPdfAnalysis() != null) DropdownMenuItem(
+                                text = { Text("查看本页解析") }, onClick = { analysisResultPage = page; toolsMenu = false },
+                            )
+                            if (pages.values.any { it.has("analysis") }) DropdownMenuItem(
+                                text = { Text("AI 文档结构") }, onClick = { analysisOutline = true; toolsMenu = false },
                             )
                         } else {
                             if (answers.size > 1) DropdownMenuItem(text = { Text("切换本便签的回答") }, onClick = {
@@ -726,6 +825,17 @@ internal fun ReaderScreen(
                     settings = openSettings, report = report)
             }
         }
+        val pageAnchor = pageButtonBounds?.translate(-rootPosition)
+        if (pageJumpOpen) {
+            ReaderPageJump(
+                page, pdf.pageCount, pageAnchor, islandPosition.vertical,
+                onDismiss = { pageJumpOpen = false },
+                onJump = { target -> pageJumpOpen = false; turnPage(target) },
+            )
+        } else scrubPage?.let { number ->
+            ReaderPageScrubIndicator(number, pdf.pageCount, pageAnchor, islandPosition.vertical)
+        }
+        sidebar(ReaderSidebarContent(page, sidebarNotes, timeline.firstOrNull()?.optString("id")), ::openNote)
     }
 
     if (pathOpen && timeline.isNotEmpty()) {
@@ -790,22 +900,20 @@ internal fun ReaderScreen(
         )
     }
 
-    if (pageDialog) {
-        var input by remember { mutableStateOf(page.toString()) }
-        AlertDialog(onDismissRequest = { pageDialog = false }, title = { Text("跳转页码") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedTextField(input, { input = it }, modifier = Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("页码") }, supportingText = { Text("共 ${pdf.pageCount} 页") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        TextButton(enabled = page > 1, onClick = { go(page - 1); pageDialog = false }) { Text("上一页") }
-                        TextButton(enabled = page < pdf.pageCount, onClick = { go(page + 1); pageDialog = false }) { Text("下一页") }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { input.toIntOrNull()?.let(::go); pageDialog = false }) { Text("跳转") } },
-            dismissButton = { TextButton(onClick = { pageDialog = false }) { Text("取消") } })
+    if (analysisDialog) PdfAnalysisDialog(page, pdf.pageCount, profile,
+        onDismiss = { analysisDialog = false },
+        configure = { analysisDialog = false; openSettings() },
+        start = ::analyzeRange,
+    )
+    if (analysisOutline) PdfAnalysisOutlineDialog(pages, navigate = { target ->
+        analysisOutline = false
+        go(target)
+    }, onDismiss = { analysisOutline = false })
+    analysisResultPage?.let { resultPage ->
+        pages[resultPage]?.currentPdfAnalysis()?.let { result ->
+            PdfAnalysisResultDialog(resultPage, result, discard = { discardAnalysis(resultPage) },
+                onDismiss = { analysisResultPage = null })
+        }
     }
 
     preview?.let { data ->
