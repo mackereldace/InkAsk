@@ -81,6 +81,7 @@ internal fun InkAsk(workspace: Workspace) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current.applicationContext
     val model = remember(context) { ReadingModel(context) }
+    val readerHistory = rememberReaderHistory()
     var library by remember { mutableStateOf(Library(emptyList(), emptyList(), emptyMap())) }
     var opened by remember { mutableStateOf<Opened?>(null) }
     var folder by remember { mutableStateOf<String?>(null) }
@@ -118,13 +119,14 @@ internal fun InkAsk(workspace: Workspace) {
         library = withContext(Dispatchers.IO) { workspace.library() }
     }
 
-    suspend fun open(item: PdfItem) {
+    suspend fun open(item: PdfItem, keepReaderSidebar: Boolean = false) {
         val next = withContext(Dispatchers.IO) {
             val project = workspace.project(item.id)
             Opened(item, project, NativePdf(workspace.pdfFile(item.id)))
         }
         opened = next
-        drawer = false
+        readerHistory.recordOpen(item.id)
+        if (!keepReaderSidebar) drawer = false
     }
     fun showLibrary(target: String? = folder) {
         val refreshNeeded = opened != null
@@ -187,9 +189,7 @@ internal fun InkAsk(workspace: Workspace) {
                     remove = { ids -> act { withContext(Dispatchers.IO) { workspace.remove(ids) }; refresh() } },
                 )
             } else {
-                key(document.item.id) {
-                    var readerFolder by remember { mutableStateOf(library.membership[document.item.id]) }
-                    var readerQuery by remember { mutableStateOf("") }
+                key(document.pdf) {
                     DisposableEffect(document.pdf) {
                         onDispose { scope.launch(Dispatchers.IO) { document.pdf.close() } }
                     }
@@ -211,19 +211,15 @@ internal fun InkAsk(workspace: Workspace) {
                         },
                         report = { trouble = it },
                         sidebar = { notes, openNote ->
-                            LibrarySidebar(
-                                drawer, library, readerFolder, document.item.id, readerQuery, { readerQuery = it },
-                                busy, onDismiss = { drawer = false },
-                                onFolder = { target -> readerFolder = target; readerQuery = "" },
+                            ReaderSidebar(
+                                drawer, library, document.item.id, readerHistory, busy, onDismiss = { drawer = false },
                                 onDocument = { item ->
-                                    if (item.id == document.item.id) drawer = false else act {
-                                        open(item)
+                                    if (item.id != document.item.id) act {
+                                        open(item, keepReaderSidebar = true)
                                         folder = library.membership[item.id]
                                         query = ""
                                     }
                                 },
-                                openPdf = addPdf, importArchive = importArchive,
-                                openSettings = { showSettings = true; drawer = false },
                                 reader = ReaderSidebarActions(notes,
                                     openNote = { id -> openNote(id); drawer = false },
                                     splitNote = { splitUpgrade = true },
