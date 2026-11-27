@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
@@ -112,6 +113,7 @@ internal fun ReaderScreen(
     var viewportCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     var zoomPivot by remember { mutableStateOf<PdfZoomPivot?>(null) }
     var toolsMenu by remember { mutableStateOf(false) }
+    var toolsAnchor by remember { mutableStateOf<Rect?>(null) }
     var pathOpen by remember { mutableStateOf(false) }
     var answerPicker by remember { mutableStateOf(false) }
     var detailsNoteId by remember { mutableStateOf<String?>(null) }
@@ -713,84 +715,17 @@ internal fun ReaderScreen(
                         onRelease = { scrubPage = null },
                         onClick = { pageJumpOpen = true },
                     )
-                    ReaderSelectionModeButton(selectionMode, islandPosition.vertical) { selectionMode = it }
+                    ReaderSelectionModeButton(selectionMode) { selectionMode = it }
                 } else {
                     ReaderButton("返回上一层", R.drawable.inkask_ic_chevron_left, action = ::back)
                     ReaderButton("便签路径", R.drawable.inkask_ic_git_branch, state = "第 ${timeline.size} 层") {
                         pathOpen = true
                     }
                 }
-                Box {
-                    ReaderButton("阅读工具", R.drawable.inkask_ic_ellipsis, active = scanning != null || analyzing != null) { toolsMenu = true }
-                    DropdownMenu(
-                        expanded = toolsMenu, onDismissRequest = { toolsMenu = false },
-                        modifier = Modifier.widthIn(min = 218.dp, max = 300.dp).heightIn(max = 470.dp),
-                        shape = ReaderCardShape, containerColor = Paper, tonalElevation = 0.dp,
-                    ) {
-                        Text(doc.item.name, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            val zoom = answerPosition?.let { answerScale } ?: scale
-                            fun changeZoom(amount: Float) {
-                                if (answerPosition == null) zoomFromCenter(scale + amount)
-                                else answerScales[answerPosition] = (answerScale + amount).coerceIn(.6f, 3f)
-                            }
-                            ReaderButton(if (answerPosition == null) "缩小" else "缩小回答", R.drawable.inkask_ic_minus) { changeZoom(-.1f) }
-                            ReaderButton("重置缩放", label = "${(zoom * 100).roundToInt()}%") {
-                                if (answerPosition == null) fitPage() else answerScales[answerPosition] = 1f
-                            }
-                            ReaderButton(if (answerPosition == null) "放大" else "放大回答", R.drawable.inkask_ic_plus) { changeZoom(.1f) }
-                        }
-                        if (analyzing != null) {
-                            DropdownMenuItem(text = { Text("AI 解析 $analysisProgress · 停止") }, onClick = {
-                                analyzing?.cancel()
-                                toolsMenu = false
-                            })
-                        }
-                        if (answerPosition == null) {
-                            DropdownMenuItem(text = { Text(if (horizontal) "切换为上下拼接" else "切换为左右拼接") }, onClick = {
-                                across = 0f; selection = null; horizontal = !horizontal; toolsMenu = false
-                            })
-                            DropdownMenuItem(text = { Text("旋转页面") }, onClick = {
-                                across = 0f; selection = null; rotation = (rotation + 90) % 360; toolsMenu = false
-                            })
-                            if (scanning != null) DropdownMenuItem(text = { Text("取消识别") }, onClick = {
-                                scanning?.cancel(); toolsMenu = false
-                            }) else if (analyzing == null && (rawText.isBlank() || recognized != null)) DropdownMenuItem(
-                                text = { Text(if (recognized != null) "重新识别" else "识别本页") },
-                                onClick = { recognizePage(); toolsMenu = false },
-                            )
-                            if (analyzing == null) DropdownMenuItem(
-                                text = { Text("AI 解析 PDF…") }, enabled = scanning == null,
-                                onClick = { analysisDialog = true; toolsMenu = false },
-                            )
-                            if (pages[page]?.currentPdfAnalysis() != null) DropdownMenuItem(
-                                text = { Text("查看本页解析") }, onClick = { analysisResultPage = page; toolsMenu = false },
-                            )
-                            if (pages.values.any { it.has("analysis") }) DropdownMenuItem(
-                                text = { Text("AI 文档结构") }, onClick = { analysisOutline = true; toolsMenu = false },
-                            )
-                        } else {
-                            if (answers.size > 1) DropdownMenuItem(text = { Text("切换本便签的回答") }, onClick = {
-                                toolsMenu = false; answerPicker = true
-                            })
-                            DropdownMenuItem(text = { Text("便签信息") }, onClick = {
-                                toolsMenu = false; detailsNoteId = answerPosition.first
-                            })
-                        }
-                        HorizontalDivider(color = Line)
-                        ExportKind.entries.forEach { kind ->
-                            DropdownMenuItem(text = { Text("导出${kind.label}") }, onClick = {
-                                toolsMenu = false
-                                export(kind)
-                            })
-                        }
-                        DropdownMenuItem(text = { Text("帮助与设置") }, onClick = { toolsMenu = false; openSettings() })
-                        DropdownMenuItem(text = { Text("返回资料库") }, onClick = { toolsMenu = false; openLibrary() })
-                    }
-                }
+                ReaderButton(
+                    "阅读工具", R.drawable.inkask_ic_ellipsis, active = scanning != null || analyzing != null,
+                    modifier = Modifier.onGloballyPositioned { toolsAnchor = it.boundsInWindow() },
+                ) { toolsMenu = true }
             }
         }
         selection?.let { selected ->
@@ -824,6 +759,72 @@ internal fun ReaderScreen(
                     },
                     settings = openSettings, report = report)
             }
+        }
+        if (toolsMenu) ReaderPopover(
+            toolsAnchor?.translate(-rootPosition), islandPosition.vertical, "阅读工具菜单", dismiss = { toolsMenu = false },
+        ) {
+            Text(doc.item.name, color = Muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically) {
+                val zoom = answerPosition?.let { answerScale } ?: scale
+                fun changeZoom(amount: Float) {
+                    if (answerPosition == null) zoomFromCenter(scale + amount)
+                    else answerScales[answerPosition] = (answerScale + amount).coerceIn(.6f, 3f)
+                }
+                ReaderButton(if (answerPosition == null) "缩小" else "缩小回答", R.drawable.inkask_ic_minus) { changeZoom(-.1f) }
+                ReaderButton("重置缩放", label = "${(zoom * 100).roundToInt()}%") {
+                    if (answerPosition == null) fitPage() else answerScales[answerPosition] = 1f
+                }
+                ReaderButton(if (answerPosition == null) "放大" else "放大回答", R.drawable.inkask_ic_plus) { changeZoom(.1f) }
+            }
+            if (analyzing != null) {
+                DropdownMenuItem(text = { Text("AI 解析 $analysisProgress · 停止") }, onClick = {
+                    analyzing?.cancel()
+                    toolsMenu = false
+                })
+            }
+            if (answerPosition == null) {
+                DropdownMenuItem(text = { Text(if (horizontal) "切换为上下拼接" else "切换为左右拼接") }, onClick = {
+                    across = 0f; selection = null; horizontal = !horizontal; toolsMenu = false
+                })
+                DropdownMenuItem(text = { Text("旋转页面") }, onClick = {
+                    across = 0f; selection = null; rotation = (rotation + 90) % 360; toolsMenu = false
+                })
+                if (scanning != null) DropdownMenuItem(text = { Text("取消识别") }, onClick = {
+                    scanning?.cancel(); toolsMenu = false
+                }) else if (analyzing == null && (rawText.isBlank() || recognized != null)) DropdownMenuItem(
+                    text = { Text(if (recognized != null) "重新识别" else "识别本页") },
+                    onClick = { recognizePage(); toolsMenu = false },
+                )
+                if (analyzing == null) DropdownMenuItem(
+                    text = { Text("AI 解析 PDF…") }, enabled = scanning == null,
+                    onClick = { analysisDialog = true; toolsMenu = false },
+                )
+                if (pages[page]?.currentPdfAnalysis() != null) DropdownMenuItem(
+                    text = { Text("查看本页解析") }, onClick = { analysisResultPage = page; toolsMenu = false },
+                )
+                if (pages.values.any { it.has("analysis") }) DropdownMenuItem(
+                    text = { Text("AI 文档结构") }, onClick = { analysisOutline = true; toolsMenu = false },
+                )
+            } else {
+                if (answers.size > 1) DropdownMenuItem(text = { Text("切换本便签的回答") }, onClick = {
+                    toolsMenu = false; answerPicker = true
+                })
+                DropdownMenuItem(text = { Text("便签信息") }, onClick = {
+                    toolsMenu = false; detailsNoteId = answerPosition.first
+                })
+            }
+            HorizontalDivider(color = Line)
+            ExportKind.entries.forEach { kind ->
+                DropdownMenuItem(text = { Text("导出${kind.label}") }, onClick = {
+                    toolsMenu = false
+                    export(kind)
+                })
+            }
+            DropdownMenuItem(text = { Text("帮助与设置") }, onClick = { toolsMenu = false; openSettings() })
+            DropdownMenuItem(text = { Text("返回资料库") }, onClick = { toolsMenu = false; openLibrary() })
         }
         val pageAnchor = pageButtonBounds?.translate(-rootPosition)
         if (pageJumpOpen) {

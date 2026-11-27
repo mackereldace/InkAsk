@@ -106,7 +106,7 @@ internal fun ReaderPageButton(
 
 @Composable
 internal fun ReaderPageScrubIndicator(page: Int, count: Int, anchor: Rect?, vertical: Boolean) {
-    PageNavigationOverlay(anchor, vertical) {
+    ReaderAnchoredPanel(anchor, vertical) {
         Surface(color = Green, shape = CircleShape, shadowElevation = 5.dp) {
             Text("第 $page / $count 页", Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
                 color = Paper, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -142,7 +142,7 @@ internal fun ReaderPageJump(
                 .clickable(interactionSource = null, indication = null, onClick = onDismiss)
                 .semantics { contentDescription = "关闭页码跳转" },
         )
-        PageNavigationOverlay(anchor, vertical) {
+        ReaderAnchoredPanel(anchor, vertical) {
             Surface(
                 modifier = Modifier.widthIn(max = 308.dp).fillMaxWidth().semantics { paneTitle = "跳转页码" },
                 shape = ReaderCardShape, color = Paper, border = BorderStroke(1.dp, Line), shadowElevation = 8.dp,
@@ -219,7 +219,7 @@ internal fun ReaderPageJump(
 }
 
 @Composable
-private fun PageNavigationOverlay(anchor: Rect?, vertical: Boolean, content: @Composable () -> Unit) {
+internal fun ReaderAnchoredPanel(anchor: Rect?, vertical: Boolean, content: @Composable () -> Unit) {
     Layout(content = content, modifier = Modifier.fillMaxSize()) { children, constraints ->
         val width = constraints.maxWidth
         val height = constraints.maxHeight

@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -207,18 +208,18 @@ internal fun SidebarBrand(onHome: () -> Unit, onDismiss: () -> Unit) {
 }
 
 @Composable
-internal fun SidebarSearch(query: String, search: (String) -> Unit) {
+internal fun SidebarSearch(query: String, search: (String) -> Unit, modifier: Modifier = Modifier, height: Dp = 44.dp) {
     val keyboard = LocalSoftwareKeyboardController.current
     BasicTextField(
         value = query, onValueChange = search,
-        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "搜索资料" },
+        modifier = modifier.fillMaxWidth().semantics { contentDescription = "搜索资料" },
         textStyle = LocalTextStyle.current.copy(color = Ink, fontSize = 13.sp),
         singleLine = true, cursorBrush = SolidColor(Green),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
         decorationBox = { input ->
             Row(
-                Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 9.dp),
+                Modifier.fillMaxWidth().heightIn(min = height).padding(horizontal = 9.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 SidebarIcon(R.drawable.inkask_ic_search, 15)

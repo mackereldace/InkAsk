@@ -4,15 +4,15 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   ArrowDownToLine, BookOpen, ChevronLeft, ChevronRight, CircleHelp, Columns2, Ellipsis, FileText,
-  Folder, FolderOpen, GitBranch, Grid2X2, Highlighter, List, Maximize2, MessageSquare, Minus, Move, PanelLeft, Plus,
+  Folder, FolderOpen, FolderTree, GitBranch, Grid2X2, Highlighter, History, List, Maximize2, MessageSquare, Minus, Move, PanelLeft, Plus,
   RotateCw, Scan, Search, Settings2, TextCursor, X,
 } from "lucide-react";
 
 const icons = {
   arrow_down_to_line: ArrowDownToLine, book_open: BookOpen, chevron_left: ChevronLeft,
   chevron_right: ChevronRight, circle_help: CircleHelp, columns: Columns2, ellipsis: Ellipsis, file_text: FileText,
-  folder_open: FolderOpen, git_branch: GitBranch, library_folder: Folder, library_document: FileText,
-  grid: Grid2X2, highlighter: Highlighter, list: List, maximize: Maximize2, message_square: MessageSquare, minus: Minus, move: Move,
+  folder_open: FolderOpen, folder_tree: FolderTree, git_branch: GitBranch, library_folder: Folder, library_document: FileText,
+  grid: Grid2X2, highlighter: Highlighter, history: History, list: List, maximize: Maximize2, message_square: MessageSquare, minus: Minus, move: Move,
   panel_left: PanelLeft, plus: Plus, rotate_cw: RotateCw, scan: Scan, search: Search,
   settings: Settings2, text_cursor: TextCursor, close: X,
 };

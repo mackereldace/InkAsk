@@ -51,13 +51,13 @@ internal fun ReaderButton(
 }
 
 @Composable
-internal fun ReaderSelectionModeButton(mode: PdfSelectionMode, vertical: Boolean, onModeChange: (PdfSelectionMode) -> Unit) {
+internal fun ReaderSelectionModeButton(mode: PdfSelectionMode, onModeChange: (PdfSelectionMode) -> Unit) {
     val textMode = mode == PdfSelectionMode.Text
     FilledIconButton(
         onClick = { onModeChange(if (textMode) PdfSelectionMode.Region else PdfSelectionMode.Text) },
         shape = CircleShape,
         colors = IconButtonDefaults.filledIconButtonColors(containerColor = Bar, contentColor = Ink),
-        modifier = Modifier.size(width = if (vertical) 44.dp else 72.dp, height = 44.dp)
+        modifier = Modifier.size(44.dp)
             .border(1.dp, Line, CircleShape)
             .semantics {
                 contentDescription = "选取方式"
@@ -65,26 +65,10 @@ internal fun ReaderSelectionModeButton(mode: PdfSelectionMode, vertical: Boolean
             },
     ) {
         Crossfade(targetState = mode, animationSpec = tween(120), label = "Selection mode") { displayed ->
-            val text = displayed == PdfSelectionMode.Text
-            val content: @Composable () -> Unit = {
-                Icon(
-                    painterResource(if (text) R.drawable.inkask_ic_text_cursor else R.drawable.inkask_ic_scan),
-                    contentDescription = null, modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.size(if (vertical) 1.dp else 5.dp))
-                Text(
-                    if (text) "文字" else "区域", fontSize = if (vertical) 10.sp else 12.sp,
-                    lineHeight = if (vertical) 13.sp else 16.sp, fontWeight = FontWeight.Medium,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (vertical) Column(
-                Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) { content() } else Row(
-                Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) { content() }
+            Icon(
+                painterResource(if (displayed == PdfSelectionMode.Text) R.drawable.inkask_ic_text_cursor else R.drawable.inkask_ic_scan),
+                contentDescription = null, modifier = Modifier.size(19.dp),
+            )
         }
     }
 }
