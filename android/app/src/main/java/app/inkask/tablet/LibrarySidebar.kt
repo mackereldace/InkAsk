@@ -235,7 +235,8 @@ internal fun SidebarSearch(query: String, search: (String) -> Unit, modifier: Mo
 @Composable
 internal fun SidebarRow(
     label: String, icon: Int, active: Boolean = false, enabled: Boolean = true, inset: Int = 0,
-    split: (() -> Unit)? = null, action: () -> Unit,
+    minHeight: Dp = 42.dp, split: (() -> Unit)? = null,
+    leading: @Composable () -> Unit = { SidebarIcon(icon, 16) }, action: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(start = (inset.coerceAtMost(4) * 9).dp).clip(SidebarRowShape)
@@ -243,12 +244,12 @@ internal fun SidebarRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(Modifier.weight(1f).clip(SidebarRowShape).semantics { selected = active }
-            .clickable(enabled = enabled, onClick = action).heightIn(min = 42.dp).padding(horizontal = 9.dp),
+            .clickable(enabled = enabled, onClick = action).heightIn(min = minHeight).padding(horizontal = 9.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            SidebarIcon(icon, 16)
-            Text(label, color = if (active) Green else Ink, fontSize = 13.sp,
-                maxLines = if (split == null) 1 else 2, overflow = TextOverflow.Ellipsis)
+            leading()
+            Text(label, modifier = Modifier.weight(1f), color = if (active) Green else Ink, fontSize = 13.sp,
+                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         if (split != null) {
             IconButton(onClick = split, enabled = enabled, modifier = Modifier.size(42.dp)) {

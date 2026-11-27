@@ -212,7 +212,7 @@ internal fun InkAsk(workspace: Workspace) {
                         report = { trouble = it },
                         sidebar = { notes, openNote ->
                             ReaderSidebar(
-                                drawer, library, document.item.id, readerHistory, busy, onDismiss = { drawer = false },
+                                drawer, library, document.item.id, readerHistory, busy, workspace, onDismiss = { drawer = false },
                                 onDocument = { item ->
                                     if (item.id != document.item.id) act {
                                         open(item, keepReaderSidebar = true)

@@ -8,6 +8,10 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.util.AtomicFile
+import android.util.LruCache
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -28,10 +32,17 @@ internal data class LocalStorage(val documents: Int, val notes: Int, val bytes: 
 internal data class QuestionImage(val name: String, val bytes: ByteArray, val source: JSONObject? = null)
 
 internal class Workspace(private val context: Context) {
+    private data class CoverKey(val id: String, val modifiedAt: Long, val length: Long)
+
     val core = SharedReadingCore(context)
     private val root = File(context.filesDir, "inkask-native").apply { mkdirs() }
     private val projects = File(root, "projects").apply { mkdirs() }
     private val index = AtomicFile(File(root, "workspace.json"))
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val coverDispatcher = Dispatchers.IO.limitedParallelism(2)
+    private val covers = object : LruCache<CoverKey, Bitmap>(3 * 1024 * 1024) {
+        override fun sizeOf(key: CoverKey, value: Bitmap) = value.allocationByteCount
+    }
     private val defaultTemplates by lazy {
         JSONObject(context.assets.open("reading-config.json").bufferedReader().use { it.readText() }).getJSONArray("templates")
     }
@@ -148,6 +159,21 @@ internal class Workspace(private val context: Context) {
     }
 
     fun pdfFile(id: String) = File(projectDir(id), "document.pdf")
+
+    suspend fun pdfCover(id: String): Bitmap? = withContext(coverDispatcher) {
+        try {
+            val file = pdfFile(id)
+            val key = CoverKey(id, file.lastModified(), file.length())
+            covers.get(key) ?: NativePdf(file).use { pdf ->
+                val page = pdf.size(1)
+                val width = (144L * page.width / maxOf(page.width, page.height)).toInt().coerceAtLeast(1)
+                pdf.render(1, width, 0)
+            }.also { covers.put(key, it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun projectDir(id: String): File {
         require(id.matches(Regex("[A-Za-z0-9._-]{1,80}")) && id != "." && id != "..")
         return File(projects, id)

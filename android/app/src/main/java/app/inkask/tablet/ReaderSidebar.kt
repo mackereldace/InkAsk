@@ -1,17 +1,23 @@
 package app.inkask.tablet
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
@@ -35,6 +41,7 @@ internal data class ReaderSidebarActions(
 @Composable
 internal fun ReaderSidebar(
     visible: Boolean, library: Library, activeDocument: String, history: ReaderHistory, busy: Boolean,
+    workspace: Workspace,
     onDismiss: () -> Unit, onDocument: (PdfItem) -> Unit, reader: ReaderSidebarActions,
     dismissOnOutside: Boolean = true,
 ) {
@@ -52,9 +59,9 @@ internal fun ReaderSidebar(
                 }
             }
         }
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(8.dp))
         if (notesTab) key(activeDocument) { SidebarNotes(reader, busy) }
-        else SidebarDocuments(library, activeDocument, history, busy, query, { query = it }, onDocument, reader.splitDocument)
+        else SidebarDocuments(workspace, library, activeDocument, history, busy, query, { query = it }, onDocument, reader.splitDocument)
     }
 }
 
@@ -62,7 +69,7 @@ private data class SidebarTreeRow(val folder: Folder?, val file: PdfItem?, val d
 
 @Composable
 private fun ColumnScope.SidebarDocuments(
-    library: Library, activeDocument: String, history: ReaderHistory, busy: Boolean,
+    workspace: Workspace, library: Library, activeDocument: String, history: ReaderHistory, busy: Boolean,
     query: String, onSearch: (String) -> Unit, open: (PdfItem) -> Unit, split: (PdfItem) -> Unit,
 ) {
     val folders = remember(library.folders) { library.folders.associateBy(Folder::id) }
@@ -97,7 +104,10 @@ private fun ColumnScope.SidebarDocuments(
             }
         }
     }
-    Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         SidebarSearch(query, onSearch, Modifier.weight(1f), height = 38.dp)
         TextButton(
             onClick = { history.setTree(!tree) }, shape = CircleShape,
@@ -118,7 +128,10 @@ private fun ColumnScope.SidebarDocuments(
         Text(if (term.isEmpty()) "资料库还没有 PDF" else "没有找到资料",
             Modifier.padding(horizontal = 9.dp, vertical = 12.dp), color = Muted, fontSize = 13.sp)
     }
-    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 6.dp)) {
+    LazyColumn(
+        Modifier.weight(1f), contentPadding = PaddingValues(top = 4.dp, bottom = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         items(rows, key = { row -> row.folder?.let { "folder-${it.id}" } ?: "pdf-${checkNotNull(row.file).id}" }) { row ->
             val folder = row.folder
             if (folder != null) {
@@ -128,8 +141,8 @@ private fun ColumnScope.SidebarDocuments(
                         .clip(SidebarRowShape).clickable {
                             expanded = if (openFolder) expanded - folder.id else expanded + folder.id
                         }.semantics { stateDescription = if (openFolder) "已展开" else "已折叠" }
-                        .heightIn(min = 40.dp).padding(horizontal = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        .heightIn(min = 44.dp).padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Icon(painterResource(R.drawable.inkask_ic_chevron_right), null,
                         Modifier.size(13.dp).rotate(if (openFolder) 90f else 0f), tint = Muted)
@@ -140,8 +153,31 @@ private fun ColumnScope.SidebarDocuments(
             } else {
                 val file = checkNotNull(row.file)
                 SidebarRow(file.name, R.drawable.inkask_ic_file_text, active = file.id == activeDocument,
-                    enabled = !busy, inset = row.depth, split = { split(file) }) { open(file) }
+                    enabled = !busy, inset = row.depth, minHeight = 62.dp, split = { split(file) },
+                    leading = { SidebarPdfCover(workspace, file.id) }) { open(file) }
             }
+        }
+    }
+}
+
+private val SidebarCoverShape = RoundedCornerShape(4.dp)
+
+@Composable
+private fun SidebarPdfCover(workspace: Workspace, documentId: String) {
+    val cover by produceState<Bitmap?>(null, workspace, documentId) {
+        value = workspace.pdfCover(documentId)
+    }
+    Box(
+        Modifier.size(36.dp, 48.dp).clip(SidebarCoverShape).background(Paper)
+            .border(1.dp, Line, SidebarCoverShape).padding(2.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val bitmap = cover
+        if (bitmap == null) {
+            SidebarIcon(R.drawable.inkask_ic_file_text, 16)
+        } else {
+            Image(remember(bitmap) { bitmap.asImageBitmap() }, contentDescription = null,
+                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
         }
     }
 }
@@ -152,7 +188,8 @@ private fun SidebarTab(label: String, active: Boolean, action: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(label, Modifier.padding(horizontal = 9.dp), color = if (active) Green else Muted,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, fontSize = 13.sp)
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, fontSize = 13.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (active) Box(Modifier.matchParentSize(), contentAlignment = Alignment.BottomCenter) {
             Box(Modifier.padding(horizontal = 9.dp).fillMaxWidth().height(2.dp).background(Green, CircleShape))
         }
@@ -187,14 +224,14 @@ private fun SidebarNotes(reader: ReaderSidebarActions, busy: Boolean) {
             }
         }
     }
-    LazyColumn(contentPadding = PaddingValues(bottom = 6.dp)) {
+    LazyColumn(contentPadding = PaddingValues(bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         list.forEach { (page, entries) ->
             if (current == null) item(key = "page-$page") {
                 Text("第 $page 页", Modifier.padding(start = 9.dp, top = 9.dp, bottom = 4.dp), color = Muted, fontSize = 12.sp)
             }
             items(entries, key = ReaderSidebarNote::id) { note ->
                 SidebarRow(note.title, R.drawable.inkask_ic_message_square, active = note.id == reader.content.activeNote,
-                    enabled = !busy, split = { reader.splitNote(note) }) { reader.openNote(note.id) }
+                    enabled = !busy, minHeight = 48.dp, split = { reader.splitNote(note) }) { reader.openNote(note.id) }
             }
         }
     }
